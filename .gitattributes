@@ -1,0 +1,22 @@
+# Everything in this repository is read by Linux: bootstrap scripts run on the
+# instance, Lambda handlers run in the runtime, workflow steps run on the runner.
+# A file committed from Windows with CRLF endings reaches all three with a
+# trailing carriage return on every line, and the failure is obscure -- a shell
+# reports `$'\r': command not found` on a line that looks correct.
+#
+# So line endings are normalised to LF in the repository and checked out as LF on
+# every platform.
+* text=auto eol=lf
+
+# Binary assets: never touched, never diffed as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.woff binary
+*.woff2 binary

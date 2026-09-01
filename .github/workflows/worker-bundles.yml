@@ -1,0 +1,72 @@
+name: Worker bundles
+
+# Rule 5 of the README.
+#
+# The engine checks this repository out; it does not build. Nothing installs
+# dependencies or runs a bundler in the customer's runner, so a stale dist/ file
+# deploys and behaves like the previous version of the code -- with a green run
+# and a correct-looking diagram.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bundles:
+    name: Committed bundle matches its source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Rebuild every worker and compare
+        run: |
+          set -euo pipefail
+
+          # A worker with no package.json is a hand-written bundle: there is
+          # nothing to rebuild and nothing to compare it against.
+          mapfile -t manifests < <(
+            find templates -type f -name package.json -path '*/worker/*' \
+              -not -path '*/node_modules/*' 2>/dev/null | sort
+          )
+
+          if [ ${#manifests[@]} -eq 0 ]; then
+            echo "No worker with a package.json. Nothing to rebuild."
+            exit 0
+          fi
+
+          for manifest in "${manifests[@]}"; do
+            dir=$(dirname "$manifest")
+            echo "=== $dir"
+            (
+              cd "$dir"
+              if [ -f package-lock.json ]; then
+                npm ci
+              else
+                npm install
+              fi
+              npm run build --if-present
+            )
+          done
+
+          if git diff --quiet -- templates; then
+            echo
+            echo "Every committed bundle matches its source."
+            exit 0
+          fi
+
+          echo
+          echo "The committed bundle is not what the source builds:"
+          git diff --stat -- templates
+          echo
+          echo "Whatever is committed here is what gets uploaded to the customer's"
+          echo "account. Commit the rebuilt output."
+          exit 1

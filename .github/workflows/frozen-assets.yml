@@ -1,0 +1,99 @@
+name: Frozen assets
+
+# Rule 2 of the README, made mechanical.
+#
+# A published template records a repository, a branch and a path -- and no commit.
+# Every run of it takes the top of the branch, so a file edited under a version
+# folder that some published template already points at changes the code for
+# everyone holding that version, silently. Nothing else in the pipeline notices.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frozen:
+    name: Published version folders stay frozen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both ends of the pull request have to be reachable for the diff below.
+          fetch-depth: 0
+
+      - name: No published asset was modified
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'frozen-override') }}
+        run: |
+          set -euo pipefail
+
+          # Modified, deleted, renamed. Additions are deliberately absent: a new
+          # file under an existing version folder cannot change what an already
+          # published template downloads.
+          #
+          # A rename prints "R100<TAB>old<TAB>new", so cut -f2 gives the path that
+          # disappeared -- which is the one that breaks.
+          #
+          # README.md is exempt: it is fetched by the checkout but never read by
+          # Terraform, so correcting it changes nothing for anyone.
+          touched=$(git diff --name-status --diff-filter=MDR "$BASE" "$HEAD" \
+            | cut -f2 \
+            | grep -E '^templates/[^/]+/v[0-9]+/' \
+            | grep -vE '(^|/)README\.md$' || true)
+
+          if [ -z "$touched" ]; then
+            echo "No file under a published version folder was modified."
+            exit 0
+          fi
+
+          echo "These files may be referenced by a published template version:"
+          echo "$touched" | sed 's/^/  /'
+          echo
+          echo "Changing one of them changes the code for everyone who already"
+          echo "downloaded the template version that points at it. There is no commit"
+          echo "pin: every run takes the top of this branch."
+          echo
+          echo "Put the new behaviour in a new version folder (v2, v3, ...) and publish"
+          echo "a new version of the template."
+
+          if [ "$OVERRIDE" = "true" ]; then
+            echo
+            echo "Label 'frozen-override' is set, so this is allowed. Say in the pull"
+            echo "request why the published version had to change."
+            exit 0
+          fi
+
+          exit 1
+
+      - name: Nothing new at the repository root
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          added=$(git diff --name-status --diff-filter=A "$BASE" "$HEAD" \
+            | cut -f2 \
+            | grep -E '^[^/]+$' \
+            | grep -vE '^(README\.md|LICENSE|CONTRIBUTING\.md|\.gitignore)$' || true)
+
+          if [ -z "$added" ]; then
+            echo "No new file at the repository root."
+            exit 0
+          fi
+
+          echo "New files at the repository root:"
+          echo "$added" | sed 's/^/  /'
+          echo
+          echo "Two reasons this is refused. A file at the root is never fetched at"
+          echo "all -- the checkout works by directory, the path is reduced to its"
+          echo "parent, and at the root there is no parent. And every root file is"
+          echo "downloaded on every run, of every template, for every customer."
+          echo
+          echo "Move it under templates/<template-id>/v<n>/."
+          exit 1

@@ -1,0 +1,11 @@
+# Build inputs, never the build output: a worker's dist/ is committed on purpose
+# (see rule 5 in the README).
+node_modules/
+
+# Python, for Lambda source directories
+__pycache__/
+*.pyc
+.venv/
+
+.DS_Store
+Thumbs.db
