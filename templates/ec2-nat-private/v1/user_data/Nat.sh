@@ -15,7 +15,12 @@ LOGFILE="/var/log/user-data.log"
 exec >"$LOGFILE" 2>&1
 
 # Load node variables (FORWARD_PORT / FORWARD_TARGET, if set on the node).
-[ -f /etc/profile.d/struct8_vars.sh ] && . /etc/profile.d/struct8_vars.sh || true
+# The generator writes them as  export KEY   = "value"  (spaces + quotes), which is NOT
+# valid shell to source, so parse the value out instead of sourcing.
+VARS=/etc/profile.d/struct8_vars.sh
+getvar() { [ -f "$VARS" ] && awk -F= -v k="$1" '$0 ~ k {gsub(/[ "]/,"",$2); print $2; exit}' "$VARS"; }
+FORWARD_PORT=$(getvar FORWARD_PORT)
+FORWARD_TARGET=$(getvar FORWARD_TARGET)
 
 # A little swap so dnf does not get OOM-killed on a 512 MB instance.
 if [ ! -f /swapfile ]; then
