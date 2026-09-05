@@ -2,9 +2,9 @@
 //
 // EventBridge invokes it every five minutes, asynchronously. The function itself
 // is deliberately small: what this template shows is everything AROUND it -- the
-// alias pinned to a published version, the provisioned concurrency and the
-// scaling floor/ceiling that back that alias, the pinned runtime, and the async
-// invoke config that routes a failed invocation to an SNS topic.
+// alias pinned to a published version, the runtime management config pinned to
+// that version, and the async invoke config that routes a failed invocation to
+// an SNS topic.
 //
 // Reads at runtime:
 //   - LOG_LEVEL  (optional) one of debug, info, warn, error. Default: info.

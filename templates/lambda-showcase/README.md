@@ -32,11 +32,21 @@ rather than as a field of the function:
 | Resource | What it adds |
 |---|---|
 | `aws_lambda_alias` | a stable name (`prod`) pointing at a published version |
-| `aws_lambda_provisioned_concurrency_config` | execution environments kept initialized, so there is no cold start |
-| `aws_lambda_function_scaling_config` | floor and ceiling of execution environments for that version |
-| `aws_lambda_runtime_management_config` | when AWS may update the runtime under the function |
+| `aws_lambda_runtime_management_config` | when AWS may update the runtime under that version |
 | `aws_lambda_function_event_invoke_config` | retries for an asynchronous invocation, and where a failure goes |
 
-The scaling config is the one with a trap: its `qualifier` takes a numeric version
-or `$LATEST.PUBLISHED`, and rejects an alias name — unlike the other three, which
-accept the name.
+The runtime management config has a trap: its `qualifier` takes a version number
+or `$LATEST` and rejects an alias name — the service refuses it at apply time,
+after `terraform validate` and `terraform plan` have both passed. In the diagram
+it is wired to the alias, and the generated code writes the version the alias
+points at.
+
+Two satellites are deliberately NOT in this template:
+
+- `aws_lambda_provisioned_concurrency_config` — needs the account's concurrency
+  quota to leave at least 10 unreserved executions after the reservation. An
+  account still at the initial quota of 10 cannot apply it at any size.
+- `aws_lambda_function_scaling_config` — only exists for a function running on a
+  capacity provider (Lambda Managed Instances). On an ordinary function the apply
+  fails with `The function provided by the arn does not contain a capacity
+  provider configuration`.
