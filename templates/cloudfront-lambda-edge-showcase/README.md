@@ -30,7 +30,17 @@ folder as it is.
 
 | Path | What it demonstrates |
 |---|---|
-| `v1/functions/api-regular/` | Non-edge function: reads env vars, larger memory/timeout, invoked via Function URL |
+| `v1/functions/api-regular/` | Non-edge function: reads env vars, larger memory/timeout, invoked via API Gateway v2 / Function URL |
+
+### Test lab (static page)
+
+| Path | What it is |
+|---|---|
+| `v1/lab/index.html` | A test console served BY the distribution, at `/lab/`. Because it is same-origin with the distribution, its `fetch` calls to `/api/*`, headers, rewrite and cookie run without CORS. Each card exercises one trigger and shows pass/fail. |
+
+The lab lives on an OPEN path (`/lab/*`, no auth edge) so it can drive the tests,
+while the protected content at `/` keeps the auth gate — the lab tests that gate
+by opening `/` in a new tab (401 without credentials, 200 with `demo:demo`).
 
 ## Lambda@Edge constraints reflected in the code
 

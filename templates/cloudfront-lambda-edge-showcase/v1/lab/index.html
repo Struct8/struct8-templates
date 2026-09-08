@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Test lab — CloudFront + Lambda@Edge</title>
+<style>
+  :root {
+    --bg: #0b1020; --card: #131a30; --line: #263050; --txt: #e8ecf5;
+    --muted: #9fb0d0; --ok: #4ade80; --fail: #f87171; --wait: #fbbf24;
+    --accent: #6fd3ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font-family: "Segoe UI", system-ui, sans-serif; line-height: 1.5;
+  }
+  header {
+    padding: 28px 24px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #131a30, #0b1020);
+  }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  .origin {
+    margin-top: 12px; font-size: 13px; color: var(--accent);
+    word-break: break-all;
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  .controls {
+    display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+    margin-bottom: 24px;
+  }
+  button {
+    background: linear-gradient(90deg, #8fd0ff, #bfe9ff); color: #05060a;
+    border: none; padding: 11px 20px; border-radius: 9px; font-size: 15px;
+    font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--line);
+  }
+  .test {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
+  }
+  .test-head {
+    display: flex; align-items: center; gap: 12px; margin-bottom: 8px;
+  }
+  .badge {
+    font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px;
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .badge.trigger { background: #1e2a4a; color: var(--accent); }
+  .status {
+    margin-left: auto; font-size: 13px; font-weight: 700; padding: 4px 12px;
+    border-radius: 20px; background: #1a2440; color: var(--muted);
+  }
+  .status.ok { background: rgba(74,222,128,.15); color: var(--ok); }
+  .status.fail { background: rgba(248,113,113,.15); color: var(--fail); }
+  .status.wait { background: rgba(251,191,36,.15); color: var(--wait); }
+  .test h3 { margin: 0; font-size: 16px; }
+  .test .desc { color: var(--muted); font-size: 13px; margin: 4px 0 12px; }
+  .test .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  pre {
+    background: #0a0f1e; border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px; font-size: 12.5px; color: #cfe0ff; overflow-x: auto;
+    margin: 12px 0 0; white-space: pre-wrap; word-break: break-word;
+  }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  footer {
+    max-width: 900px; margin: 0 auto; padding: 12px 24px 40px;
+    color: var(--muted); font-size: 12px;
+  }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Test lab — CloudFront + Lambda@Edge</h1>
+  <p>Each card exercises one edge trigger (or the API) and shows the result.
+     This page is served by the distribution itself, so the API, headers,
+     rewrite and cookie tests run <b>same-origin</b> (no CORS in the way).</p>
+  <div class="origin" id="origin">origin: detecting...</div>
+</header>
+
+<main>
+  <div class="controls">
+    <button id="run-all">Run all tests</button>
+    <button class="ghost" id="open-protected">Open protected area (/) in a new tab</button>
+  </div>
+
+  <!-- 1. AUTH (viewer-request) -->
+  <div class="test" id="t-auth">
+    <div class="test-head">
+      <span class="badge trigger">viewer-request</span>
+      <h3>Edge authentication</h3>
+      <span class="status" id="s-auth">idle</span>
+    </div>
+    <p class="desc">The protected path <code>/</code> requires Basic auth. Without
+       credentials, the edge returns <b>401</b> before any cache/origin.</p>
+    <div class="row">
+      <button data-test="auth-sem">Test WITHOUT credentials (expects 401)</button>
+      <button class="ghost" id="auth-com">Open WITH credentials (demo:demo) in a new tab</button>
+    </div>
+    <pre id="out-auth">—</pre>
+    <p class="hint">The "with credentials" test opens in a new tab because the browser
+       handles the Basic auth prompt in a way that makes it hard to read via fetch.</p>
+  </div>
+
+  <!-- 2. REWRITE (origin-request) -->
+  <div class="test" id="t-rewrite">
+    <div class="test-head">
+      <span class="badge trigger">origin-request</span>
+      <h3>URL rewrite</h3>
+      <span class="status" id="s-rewrite">idle</span>
+    </div>
+    <p class="desc">A directory path is rewritten to <code>/index.html</code>
+       before reaching the origin (SPA-style routing).</p>
+    <div class="row">
+      <button data-test="rewrite">Test rewrite on /lab/nonexistent-route/</button>
+    </div>
+    <pre id="out-rewrite">—</pre>
+  </div>
+
+  <!-- 3. SECURITY HEADERS (origin-response) -->
+  <div class="test" id="t-headers">
+    <div class="test-head">
+      <span class="badge trigger">origin-response</span>
+      <h3>Security headers</h3>
+      <span class="status" id="s-headers">idle</span>
+    </div>
+    <p class="desc">The response should carry HSTS, CSP, X-Frame-Options, etc.,
+       injected by the edge (or by the response-headers policy).</p>
+    <div class="row">
+      <button data-test="headers">Check response headers</button>
+    </div>
+    <pre id="out-headers">—</pre>
+  </div>
+
+  <!-- 4. AB TEST (viewer-response) -->
+  <div class="test" id="t-abtest">
+    <div class="test-head">
+      <span class="badge trigger">viewer-response</span>
+      <h3>A/B testing cookie</h3>
+      <span class="status" id="s-abtest">idle</span>
+    </div>
+    <p class="desc">On the response to the viewer, the edge sets an
+       <code>abtest=A|B</code> cookie if one is not already present.</p>
+    <div class="row">
+      <button data-test="abtest">Check abtest cookie</button>
+    </div>
+    <pre id="out-abtest">—</pre>
+  </div>
+
+  <!-- 5. API via CloudFront -->
+  <div class="test" id="t-api">
+    <div class="test-head">
+      <span class="badge trigger">API Gateway v2 → Lambda</span>
+      <h3>Dynamic API at /api/*</h3>
+      <span class="status" id="s-api">idle</span>
+    </div>
+    <p class="desc">CloudFront routes <code>/api/*</code> to API Gateway v2,
+       which invokes the regular (non-edge) Lambda. JSON response.</p>
+    <div class="row">
+      <button data-test="api">Call /api/hello</button>
+    </div>
+    <pre id="out-api">—</pre>
+  </div>
+</main>
+
+<footer>
+  Lab for the <b>cloudfront-lambda-edge-showcase</b> template. The
+  <code>demo:demo</code> credentials are illustrative only. CloudFront
+  propagation can take a few minutes after an apply — if a test fails right
+  after applying, wait and try again.
+</footer>
+
+<script>
+  // The origin is the distribution itself (this page is served by it).
+  const ORIGIN = location.origin;
+  document.getElementById("origin").textContent = "origin: " + ORIGIN;
+
+  const setStatus = (id, state, text) => {
+    const el = document.getElementById("s-" + id);
+    el.className = "status " + state;
+    el.textContent = text;
+  };
+  const out = (id, txt) => { document.getElementById("out-" + id).textContent = txt; };
+
+  // --- 1. AUTH without credentials: expects 401 ---
+  async function testAuthSem() {
+    setStatus("auth", "wait", "testing...");
+    try {
+      const r = await fetch(ORIGIN + "/", { method: "GET", cache: "no-store" });
+      if (r.status === 401) {
+        setStatus("auth", "ok", "401 (blocked ✓)");
+        out("auth", "Status: 401 Unauthorized\nThe edge blocked access without credentials, as expected.");
+      } else {
+        setStatus("auth", "fail", r.status + " (expected 401)");
+        out("auth", "Status: " + r.status + "\nExpected 401. The auth trigger may not be active or the path is not protected.");
+      }
+    } catch (e) {
+      setStatus("auth", "fail", "error");
+      out("auth", "Request failed: " + e.message);
+    }
+  }
+
+  // --- 2. REWRITE: a directory path should resolve (200) via index.html ---
+  async function testRewrite() {
+    setStatus("rewrite", "wait", "testing...");
+    try {
+      const r = await fetch(ORIGIN + "/lab/nonexistent-route/", { cache: "no-store" });
+      if (r.ok) {
+        setStatus("rewrite", "ok", r.status + " (resolved ✓)");
+        out("rewrite", "Status: " + r.status + "\nThe directory path was rewritten and resolved (origin-request rewrite).");
+      } else {
+        setStatus("rewrite", "fail", r.status);
+        out("rewrite", "Status: " + r.status + "\nExpected 200. Check the origin-request trigger and the /lab/* behavior.");
+      }
+    } catch (e) {
+      setStatus("rewrite", "fail", "error");
+      out("rewrite", "Failed: " + e.message);
+    }
+  }
+
+  // --- 3. SECURITY HEADERS ---
+  async function testHeaders() {
+    setStatus("headers", "wait", "testing...");
+    const expected = ["strict-transport-security", "content-security-policy",
+                      "x-content-type-options", "x-frame-options"];
+    try {
+      const r = await fetch(ORIGIN + "/lab/", { cache: "no-store" });
+      const found = expected.filter((h) => r.headers.get(h));
+      const lines = expected.map((h) =>
+        (r.headers.get(h) ? "✓ " : "✗ ") + h + ": " + (r.headers.get(h) || "(absent)"));
+      if (found.length >= 2) {
+        setStatus("headers", "ok", found.length + "/" + expected.length + " ✓");
+      } else {
+        setStatus("headers", "fail", found.length + "/" + expected.length);
+      }
+      out("headers", lines.join("\n") +
+        "\n\nNote: some security headers may not be exposed to JS by browser policy, even when present on the response.");
+    } catch (e) {
+      setStatus("headers", "fail", "error");
+      out("headers", "Failed: " + e.message);
+    }
+  }
+
+  // --- 4. AB TEST cookie ---
+  async function testAbtest() {
+    setStatus("abtest", "wait", "testing...");
+    try {
+      await fetch(ORIGIN + "/lab/", { cache: "no-store", credentials: "include" });
+      const m = document.cookie.match(/abtest=([AB])/);
+      if (m) {
+        setStatus("abtest", "ok", "group " + m[1] + " ✓");
+        out("abtest", "Cookie found: abtest=" + m[1] +
+          "\nThe edge (viewer-response) assigned the viewer to an A/B group.");
+      } else {
+        setStatus("abtest", "wait", "no visible cookie");
+        out("abtest", "document.cookie: " + (document.cookie || "(empty)") +
+          "\n\nNote: if the cookie is HttpOnly, JS cannot see it — check DevTools > Application > Cookies.");
+      }
+    } catch (e) {
+      setStatus("abtest", "fail", "error");
+      out("abtest", "Failed: " + e.message);
+    }
+  }
+
+  // --- 5. API ---
+  async function testApi() {
+    setStatus("api", "wait", "calling...");
+    try {
+      const r = await fetch(ORIGIN + "/api/hello", { cache: "no-store" });
+      const txt = await r.text();
+      if (r.ok) {
+        setStatus("api", "ok", r.status + " ✓");
+        let pretty = txt;
+        try { pretty = JSON.stringify(JSON.parse(txt), null, 2); } catch (_) {}
+        out("api", "Status: " + r.status + "\n" + pretty);
+      } else {
+        setStatus("api", "fail", r.status);
+        out("api", "Status: " + r.status + "\n" + txt);
+      }
+    } catch (e) {
+      setStatus("api", "fail", "error");
+      out("api", "Failed: " + e.message);
+    }
+  }
+
+  const TESTS = {
+    "auth-sem": testAuthSem, rewrite: testRewrite, headers: testHeaders,
+    abtest: testAbtest, api: testApi,
+  };
+
+  document.querySelectorAll("button[data-test]").forEach((b) => {
+    b.addEventListener("click", () => TESTS[b.dataset.test]());
+  });
+  document.getElementById("auth-com").addEventListener("click", () => {
+    // embed the credentials in the URL so the browser opens authenticated
+    const u = new URL(ORIGIN + "/");
+    window.open("https://demo:demo@" + u.host + "/", "_blank");
+  });
+  document.getElementById("open-protected").addEventListener("click", () => {
+    window.open(ORIGIN + "/", "_blank");
+  });
+  document.getElementById("run-all").addEventListener("click", async () => {
+    await testAuthSem(); await testRewrite(); await testHeaders();
+    await testAbtest(); await testApi();
+  });
+</script>
+</body>
+</html>
