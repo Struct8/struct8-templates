@@ -3,183 +3,348 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Test lab — CloudFront + Lambda@Edge</title>
+<title>CloudFront + Lambda@Edge — Interactive Test Lab</title>
 <style>
   :root {
-    --bg: #0b1020; --card: #131a30; --line: #263050; --txt: #e8ecf5;
-    --muted: #9fb0d0; --ok: #4ade80; --fail: #f87171; --wait: #fbbf24;
-    --accent: #6fd3ff;
+    --bg: #0a0e1a;
+    --bg2: #0f1526;
+    --card: #151c30;
+    --line: #26304d;
+    --line-soft: #1e2740;
+    --txt: #eef2fb;
+    --muted: #9aa8c8;
+    --faint: #6b7799;
+    --ok: #4ade80;
+    --fail: #fb7185;
+    --wait: #fbbf24;
+    --accent: #7dd3fc;
+    --radius: 14px;
+    --shadow: 0 8px 30px rgba(0,0,0,.35);
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body {
-    margin: 0; background: var(--bg); color: var(--txt);
-    font-family: "Segoe UI", system-ui, sans-serif; line-height: 1.5;
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, #16204380 0%, transparent 60%),
+      radial-gradient(1000px 500px at 100% 0%, #2a1e4a55 0%, transparent 55%),
+      var(--bg);
+    color: var(--txt);
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
   }
-  header {
-    padding: 28px 24px; border-bottom: 1px solid var(--line);
-    background: linear-gradient(180deg, #131a30, #0b1020);
+
+  header { padding: 40px 24px 28px; max-width: 1000px; margin: 0 auto; }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); font-weight: 700;
+    background: #7dd3fc14; border: 1px solid #7dd3fc33;
+    padding: 5px 12px; border-radius: 999px; margin-bottom: 16px;
   }
-  header h1 { margin: 0 0 6px; font-size: 22px; }
-  header p { margin: 0; color: var(--muted); font-size: 14px; }
-  .origin {
-    margin-top: 12px; font-size: 13px; color: var(--accent);
-    word-break: break-all;
+  header h1 {
+    margin: 0 0 12px; font-size: 30px; line-height: 1.2;
+    background: linear-gradient(90deg, #eef2fb, #9dc7ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  header .lead { margin: 0; font-size: 16px; color: var(--muted); max-width: 720px; }
+
+  .origin-bar {
+    margin-top: 20px; display: flex; align-items: center; gap: 12px;
+    flex-wrap: wrap; padding: 12px 16px;
+    background: var(--bg2); border: 1px solid var(--line-soft);
+    border-radius: 12px; font-size: 13px;
+  }
+  .origin-bar .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+  .origin-bar .dot.live { background: var(--ok); box-shadow: 0 0 0 4px #4ade8022; }
+  .origin-bar code { color: var(--accent); font-size: 13px; word-break: break-all; }
+
   .controls {
+    max-width: 1000px; margin: 24px auto 8px; padding: 0 24px;
     display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
-    margin-bottom: 24px;
   }
-  button {
-    background: linear-gradient(90deg, #8fd0ff, #bfe9ff); color: #05060a;
-    border: none; padding: 11px 20px; border-radius: 9px; font-size: 15px;
-    font-weight: 600; cursor: pointer;
+  .btn {
+    font: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+    padding: 12px 22px; border-radius: 11px; border: 1px solid transparent;
+    transition: transform .08s ease, filter .15s ease, background .15s ease;
   }
-  button:hover { filter: brightness(1.08); }
-  button.ghost {
-    background: transparent; color: var(--accent);
-    border: 1px solid var(--line);
+  .btn:active { transform: translateY(1px); }
+  .btn-primary { background: linear-gradient(90deg, #7dd3fc, #a78bfa); color: #0a0e1a; }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-ghost { background: transparent; color: var(--accent); border-color: var(--line); }
+  .btn-ghost:hover { background: #7dd3fc10; border-color: #7dd3fc55; }
+  .btn-small {
+    font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 9px;
+    cursor: pointer; border: 1px solid var(--line); background: #ffffff08; color: var(--txt);
+    transition: background .15s ease, border-color .15s ease;
   }
-  .test {
-    background: var(--card); border: 1px solid var(--line);
-    border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
+  .btn-small:hover { background: #7dd3fc14; border-color: #7dd3fc55; }
+  .btn-small.secondary { color: var(--muted); }
+
+  .legend {
+    max-width: 1000px; margin: 4px auto 0; padding: 0 24px;
+    font-size: 12.5px; color: var(--faint); display: flex; gap: 18px; flex-wrap: wrap;
   }
-  .test-head {
-    display: flex; align-items: center; gap: 12px; margin-bottom: 8px;
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .pill { width: 10px; height: 10px; border-radius: 3px; }
+  .pill.ok { background: var(--ok); } .pill.fail { background: var(--fail); } .pill.wait { background: var(--wait); }
+
+  main { max-width: 1000px; margin: 0 auto; padding: 20px 24px 60px; }
+  .card {
+    background: linear-gradient(180deg, var(--card), var(--bg2));
+    border: 1px solid var(--line-soft); border-radius: var(--radius);
+    padding: 20px 22px; margin-bottom: 16px; box-shadow: var(--shadow);
+    transition: border-color .2s ease;
   }
-  .badge {
-    font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px;
-    text-transform: uppercase; letter-spacing: 0.04em;
+  .card:hover { border-color: var(--line); }
+  .card-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .num {
+    flex: none; width: 30px; height: 30px; border-radius: 9px;
+    display: grid; place-items: center; font-weight: 700; font-size: 14px;
+    background: #7dd3fc18; color: var(--accent); border: 1px solid #7dd3fc33;
   }
-  .badge.trigger { background: #1e2a4a; color: var(--accent); }
+  .card h3 { margin: 0; font-size: 17px; }
+  .trigger-tag {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
+    padding: 3px 9px; border-radius: 7px;
+    background: #a78bfa1a; color: #c4b5fd; border: 1px solid #a78bfa33;
+  }
   .status {
-    margin-left: auto; font-size: 13px; font-weight: 700; padding: 4px 12px;
-    border-radius: 20px; background: #1a2440; color: var(--muted);
+    margin-left: auto; font-size: 12.5px; font-weight: 700;
+    padding: 5px 13px; border-radius: 999px;
+    background: #2a3350; color: var(--muted); white-space: nowrap;
   }
-  .status.ok { background: rgba(74,222,128,.15); color: var(--ok); }
-  .status.fail { background: rgba(248,113,113,.15); color: var(--fail); }
-  .status.wait { background: rgba(251,191,36,.15); color: var(--wait); }
-  .test h3 { margin: 0; font-size: 16px; }
-  .test .desc { color: var(--muted); font-size: 13px; margin: 4px 0 12px; }
-  .test .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .status.ok { background: #4ade8018; color: var(--ok); }
+  .status.fail { background: #fb718518; color: var(--fail); }
+  .status.wait { background: #fbbf2418; color: var(--wait); }
+
+  .explain {
+    margin: 14px 0 0; padding: 14px 16px;
+    background: #0b1122; border-radius: 11px; border: 1px solid var(--line-soft);
+  }
+  .explain p { margin: 0 0 8px; font-size: 14px; color: var(--muted); }
+  .explain p:last-child { margin-bottom: 0; }
+  .explain b { color: var(--txt); font-weight: 600; }
+  .explain .what { color: var(--accent); font-weight: 600; }
+
+  .actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+
   pre {
-    background: #0a0f1e; border: 1px solid var(--line); border-radius: 8px;
-    padding: 12px; font-size: 12.5px; color: #cfe0ff; overflow-x: auto;
-    margin: 12px 0 0; white-space: pre-wrap; word-break: break-word;
+    margin: 14px 0 0; padding: 14px 16px; border-radius: 10px;
+    background: #060a14; border: 1px solid var(--line-soft);
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 12.5px; line-height: 1.5; color: #b8c9e8;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-word; max-height: 260px;
   }
-  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  pre:empty { display: none; }
+
+  code.inline {
+    font-family: ui-monospace, Consolas, monospace; font-size: 13px;
+    background: #ffffff0d; padding: 1px 7px; border-radius: 6px; color: #cfe0ff;
+  }
+
   footer {
-    max-width: 900px; margin: 0 auto; padding: 12px 24px 40px;
-    color: var(--muted); font-size: 12px;
+    max-width: 1000px; margin: 0 auto; padding: 24px; color: var(--faint);
+    font-size: 12.5px; border-top: 1px solid var(--line-soft);
   }
-  code { color: var(--accent); }
+  footer b { color: var(--muted); }
+  .concept-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px; margin: 14px 0 0;
+  }
+  .concept {
+    background: var(--bg2); border: 1px solid var(--line-soft);
+    border-radius: 11px; padding: 12px 14px;
+  }
+  .concept h4 { margin: 0 0 4px; font-size: 13px; color: var(--accent); }
+  .concept p { margin: 0; font-size: 12.5px; color: var(--muted); }
 </style>
 </head>
 <body>
+
 <header>
-  <h1>Test lab — CloudFront + Lambda@Edge</h1>
-  <p>Each card exercises one edge trigger (or the API) and shows the result.
-     This page is served by the distribution itself, so the API, headers,
-     rewrite and cookie tests run <b>same-origin</b> (no CORS in the way).</p>
-  <div class="origin" id="origin">origin: detecting...</div>
+  <div class="eyebrow">● Interactive test lab</div>
+  <h1>CloudFront + Lambda@Edge</h1>
+  <p class="lead">
+    This page runs live checks against the CloudFront distribution that serves it.
+    Each card exercises one part of the stack — an edge function trigger, the dynamic
+    API, or the signed-URL protection — and explains what it does and what a correct
+    result looks like. Because this page is served <b>by the same distribution</b>,
+    the checks run same-origin, so no CORS gets in the way.
+  </p>
+  <div class="origin-bar">
+    <span class="dot" id="origin-dot"></span>
+    <span>Serving distribution:</span>
+    <code id="origin">detecting…</code>
+  </div>
 </header>
 
-<main>
-  <div class="controls">
-    <button id="run-all">Run all tests</button>
-    <button class="ghost" id="open-protected">Open protected area (/) in a new tab</button>
-  </div>
+<div class="controls">
+  <button class="btn btn-primary" id="run-all">▶ Run all checks</button>
+  <button class="btn btn-ghost" id="open-protected">Open protected root (/) in a new tab</button>
+</div>
+<div class="legend">
+  <span><span class="pill ok"></span> pass — behaved as expected</span>
+  <span><span class="pill wait"></span> running / needs a look</span>
+  <span><span class="pill fail"></span> not the expected result</span>
+</div>
 
-  <!-- 1. AUTH (viewer-request) -->
-  <div class="test" id="t-auth">
-    <div class="test-head">
-      <span class="badge trigger">viewer-request</span>
+<main>
+
+  <section class="card" id="c-auth">
+    <div class="card-top">
+      <span class="num">1</span>
       <h3>Edge authentication</h3>
+      <span class="trigger-tag">viewer-request</span>
       <span class="status" id="s-auth">idle</span>
     </div>
-    <p class="desc">The protected path <code>/</code> requires Basic auth. Without
-       credentials, the edge returns <b>401</b> before any cache/origin.</p>
-    <div class="row">
-      <button data-test="auth-sem">Test WITHOUT credentials (expects 401)</button>
-      <button class="ghost" id="auth-com">Open WITH credentials (demo:demo) in a new tab</button>
+    <div class="explain">
+      <p><span class="what">What it is:</span> a Lambda@Edge function that runs on the
+      <b>viewer request</b> — the first hook, before CloudFront checks its cache. The
+      classic place for an authentication gate.</p>
+      <p><span class="what">What this checks:</span> the protected root
+      <code class="inline">/</code> requires HTTP Basic auth. Without credentials the
+      edge should answer <b>401</b> before reaching the origin. With
+      <code class="inline">demo:demo</code> it should let you in.</p>
     </div>
-    <pre id="out-auth">—</pre>
-    <p class="hint">The "with credentials" test opens in a new tab because the browser
-       handles the Basic auth prompt in a way that makes it hard to read via fetch.</p>
-  </div>
+    <div class="actions">
+      <button class="btn-small" data-test="auth">Test without credentials → expect 401</button>
+      <button class="btn-small secondary" id="auth-with">Open with demo:demo ↗</button>
+    </div>
+    <pre id="out-auth"></pre>
+  </section>
 
-  <!-- 2. REWRITE (origin-request) -->
-  <div class="test" id="t-rewrite">
-    <div class="test-head">
-      <span class="badge trigger">origin-request</span>
-      <h3>URL rewrite</h3>
+  <section class="card" id="c-rewrite">
+    <div class="card-top">
+      <span class="num">2</span>
+      <h3>URL rewrite (SPA routing)</h3>
+      <span class="trigger-tag">origin-request</span>
       <span class="status" id="s-rewrite">idle</span>
     </div>
-    <p class="desc">A directory path is rewritten to <code>/index.html</code>
-       before reaching the origin (SPA-style routing).</p>
-    <div class="row">
-      <button data-test="rewrite">Test rewrite on /lab/nonexistent-route/</button>
+    <div class="explain">
+      <p><span class="what">What it is:</span> a function on the <b>origin request</b>
+      hook — it runs only on a cache miss, right before CloudFront goes to S3. Cheap,
+      because its result can be cached.</p>
+      <p><span class="what">What this checks:</span> a directory path like
+      <code class="inline">/lab/anything/</code> is rewritten to
+      <code class="inline">/index.html</code> so a single-page app resolves. A
+      <b>200</b> means the rewrite worked.</p>
     </div>
-    <pre id="out-rewrite">—</pre>
-  </div>
+    <div class="actions">
+      <button class="btn-small" data-test="rewrite">Test a directory path → expect 200</button>
+    </div>
+    <pre id="out-rewrite"></pre>
+  </section>
 
-  <!-- 3. SECURITY HEADERS (origin-response) -->
-  <div class="test" id="t-headers">
-    <div class="test-head">
-      <span class="badge trigger">origin-response</span>
+  <section class="card" id="c-headers">
+    <div class="card-top">
+      <span class="num">3</span>
       <h3>Security headers</h3>
+      <span class="trigger-tag">origin-response</span>
       <span class="status" id="s-headers">idle</span>
     </div>
-    <p class="desc">The response should carry HSTS, CSP, X-Frame-Options, etc.,
-       injected by the edge (or by the response-headers policy).</p>
-    <div class="row">
-      <button data-test="headers">Check response headers</button>
+    <div class="explain">
+      <p><span class="what">What it is:</span> a function on the <b>origin response</b>
+      hook — runs after the origin answers, before caching, so it adds headers once and
+      serves them from cache afterwards.</p>
+      <p><span class="what">What this checks:</span> the response should carry
+      <code class="inline">Strict-Transport-Security</code>,
+      <code class="inline">Content-Security-Policy</code> and more. Browsers hide some
+      headers from JavaScript even when present — also confirm in DevTools → Network.</p>
     </div>
-    <pre id="out-headers">—</pre>
-  </div>
+    <div class="actions">
+      <button class="btn-small" data-test="headers">Inspect response headers</button>
+    </div>
+    <pre id="out-headers"></pre>
+  </section>
 
-  <!-- 4. AB TEST (viewer-response) -->
-  <div class="test" id="t-abtest">
-    <div class="test-head">
-      <span class="badge trigger">viewer-response</span>
+  <section class="card" id="c-abtest">
+    <div class="card-top">
+      <span class="num">4</span>
       <h3>A/B testing cookie</h3>
+      <span class="trigger-tag">viewer-response</span>
       <span class="status" id="s-abtest">idle</span>
     </div>
-    <p class="desc">On the response to the viewer, the edge sets an
-       <code>abtest=A|B</code> cookie if one is not already present.</p>
-    <div class="row">
-      <button data-test="abtest">Check abtest cookie</button>
+    <div class="explain">
+      <p><span class="what">What it is:</span> a function on the <b>viewer response</b>
+      hook — the last step before the answer reaches the browser. Good for per-visitor
+      personalization.</p>
+      <p><span class="what">What this checks:</span> the edge assigns you to group A or B
+      and pins it with an <code class="inline">abtest</code> cookie. If set
+      <code class="inline">HttpOnly</code>, JavaScript cannot read it — check DevTools →
+      Application → Cookies.</p>
     </div>
-    <pre id="out-abtest">—</pre>
-  </div>
+    <div class="actions">
+      <button class="btn-small" data-test="abtest">Check the abtest cookie</button>
+    </div>
+    <pre id="out-abtest"></pre>
+  </section>
 
-  <!-- 5. API via CloudFront -->
-  <div class="test" id="t-api">
-    <div class="test-head">
-      <span class="badge trigger">API Gateway v2 → Lambda</span>
-      <h3>Dynamic API at /api/*</h3>
+  <section class="card" id="c-api">
+    <div class="card-top">
+      <span class="num">5</span>
+      <h3>Dynamic API</h3>
+      <span class="trigger-tag">API Gateway v2 → Lambda</span>
       <span class="status" id="s-api">idle</span>
     </div>
-    <p class="desc">CloudFront routes <code>/api/*</code> to API Gateway v2,
-       which invokes the regular (non-edge) Lambda. JSON response.</p>
-    <div class="row">
-      <button data-test="api">Call /api/hello</button>
+    <div class="explain">
+      <p><span class="what">What it is:</span> a <b>regular (non-edge) Lambda</b>, the
+      counterpoint to the edge functions. CloudFront routes
+      <code class="inline">/api/*</code> to an HTTP API (API Gateway v2), which invokes
+      the function.</p>
+      <p><span class="what">What this checks:</span> calling
+      <code class="inline">/api/hello</code> should return <b>200</b> with a JSON
+      greeting from the Lambda.</p>
     </div>
-    <pre id="out-api">—</pre>
-  </div>
+    <div class="actions">
+      <button class="btn-small" data-test="api">Call /api/hello → expect JSON</button>
+    </div>
+    <pre id="out-api"></pre>
+  </section>
+
+  <section class="card" id="c-signed">
+    <div class="card-top">
+      <span class="num">6</span>
+      <h3>Signed-URL protection</h3>
+      <span class="trigger-tag">trusted key group</span>
+      <span class="status" id="s-signed">idle</span>
+    </div>
+    <div class="explain">
+      <p><span class="what">What it is:</span> the <code class="inline">/premium/*</code>
+      path is locked behind a CloudFront <b>trusted key group</b>. Only requests carrying
+      a valid signature (a signed URL) get through.</p>
+      <p><span class="what">What this checks:</span> opening
+      <code class="inline">/premium/secret.html</code> <b>without</b> a signature should
+      be refused with <b>403 MissingKey</b>. That refusal is the feature working — the
+      content is not publicly reachable.</p>
+    </div>
+    <div class="actions">
+      <button class="btn-small" data-test="signed">Access without a signature → expect 403</button>
+    </div>
+    <pre id="out-signed"></pre>
+  </section>
+
 </main>
 
 <footer>
-  Lab for the <b>cloudfront-lambda-edge-showcase</b> template. The
-  <code>demo:demo</code> credentials are illustrative only. CloudFront
-  propagation can take a few minutes after an apply — if a test fails right
-  after applying, wait and try again.
+  <p><b>About this lab.</b> It is the test page shipped with the
+  <code class="inline">cloudfront-lambda-edge-showcase</code> template. The
+  <code class="inline">demo:demo</code> credentials are illustrative only — in
+  production you would validate a signed token instead.</p>
+  <div class="concept-grid">
+    <div class="concept"><h4>4 edge triggers</h4><p>viewer-request, origin-request, origin-response and viewer-response — one function each.</p></div>
+    <div class="concept"><h4>Edge runs in us-east-1</h4><p>Lambda@Edge is created in us-east-1 and replicated globally by CloudFront.</p></div>
+    <div class="concept"><h4>Edge vs. regular</h4><p>The API Lambda contrasts with the edge ones: it takes env vars and a longer timeout.</p></div>
+    <div class="concept"><h4>Propagation</h4><p>After an apply, edge functions take a few minutes to reach every location.</p></div>
+  </div>
 </footer>
 
 <script>
-  // The origin is the distribution itself (this page is served by it).
   const ORIGIN = location.origin;
-  document.getElementById("origin").textContent = "origin: " + ORIGIN;
+  document.getElementById("origin").textContent = ORIGIN;
+  document.getElementById("origin-dot").classList.add("live");
 
   const setStatus = (id, state, text) => {
     const el = document.getElementById("s-" + id);
@@ -188,126 +353,104 @@
   };
   const out = (id, txt) => { document.getElementById("out-" + id).textContent = txt; };
 
-  // --- 1. AUTH without credentials: expects 401 ---
-  async function testAuthSem() {
-    setStatus("auth", "wait", "testing...");
+  async function testAuth() {
+    setStatus("auth", "wait", "testing…");
     try {
-      const r = await fetch(ORIGIN + "/", { method: "GET", cache: "no-store" });
+      const r = await fetch(ORIGIN + "/", { cache: "no-store" });
       if (r.status === 401) {
-        setStatus("auth", "ok", "401 (blocked ✓)");
-        out("auth", "Status: 401 Unauthorized\nThe edge blocked access without credentials, as expected.");
+        setStatus("auth", "ok", "401 — blocked ✓");
+        out("auth", "HTTP 401 Unauthorized\nThe edge refused the request with no credentials, exactly as intended.");
       } else {
-        setStatus("auth", "fail", r.status + " (expected 401)");
-        out("auth", "Status: " + r.status + "\nExpected 401. The auth trigger may not be active or the path is not protected.");
+        setStatus("auth", "fail", r.status + " — expected 401");
+        out("auth", "HTTP " + r.status + "\nExpected 401. The viewer-request auth function may not be active on this path yet (edge propagation can take a few minutes).");
       }
-    } catch (e) {
-      setStatus("auth", "fail", "error");
-      out("auth", "Request failed: " + e.message);
-    }
+    } catch (e) { setStatus("auth", "fail", "network error"); out("auth", "Request failed: " + e.message); }
   }
 
-  // --- 2. REWRITE: a directory path should resolve (200) via index.html ---
   async function testRewrite() {
-    setStatus("rewrite", "wait", "testing...");
+    setStatus("rewrite", "wait", "testing…");
     try {
-      const r = await fetch(ORIGIN + "/lab/nonexistent-route/", { cache: "no-store" });
+      const r = await fetch(ORIGIN + "/lab/does-not-exist/", { cache: "no-store" });
       if (r.ok) {
-        setStatus("rewrite", "ok", r.status + " (resolved ✓)");
-        out("rewrite", "Status: " + r.status + "\nThe directory path was rewritten and resolved (origin-request rewrite).");
+        setStatus("rewrite", "ok", r.status + " — resolved ✓");
+        out("rewrite", "HTTP " + r.status + "\nA directory-style path resolved to index.html — the origin-request rewrite is working.");
       } else {
         setStatus("rewrite", "fail", r.status);
-        out("rewrite", "Status: " + r.status + "\nExpected 200. Check the origin-request trigger and the /lab/* behavior.");
+        out("rewrite", "HTTP " + r.status + "\nExpected 200. Check the origin-request trigger on the /lab/* behavior.");
       }
-    } catch (e) {
-      setStatus("rewrite", "fail", "error");
-      out("rewrite", "Failed: " + e.message);
-    }
+    } catch (e) { setStatus("rewrite", "fail", "network error"); out("rewrite", "Request failed: " + e.message); }
   }
 
-  // --- 3. SECURITY HEADERS ---
   async function testHeaders() {
-    setStatus("headers", "wait", "testing...");
+    setStatus("headers", "wait", "testing…");
     const expected = ["strict-transport-security", "content-security-policy",
-                      "x-content-type-options", "x-frame-options"];
+                      "x-content-type-options", "x-frame-options", "referrer-policy"];
     try {
       const r = await fetch(ORIGIN + "/lab/", { cache: "no-store" });
-      const found = expected.filter((h) => r.headers.get(h));
-      const lines = expected.map((h) =>
-        (r.headers.get(h) ? "✓ " : "✗ ") + h + ": " + (r.headers.get(h) || "(absent)"));
-      if (found.length >= 2) {
-        setStatus("headers", "ok", found.length + "/" + expected.length + " ✓");
-      } else {
-        setStatus("headers", "fail", found.length + "/" + expected.length);
-      }
-      out("headers", lines.join("\n") +
-        "\n\nNote: some security headers may not be exposed to JS by browser policy, even when present on the response.");
-    } catch (e) {
-      setStatus("headers", "fail", "error");
-      out("headers", "Failed: " + e.message);
-    }
+      const lines = expected.map((h) => {
+        const v = r.headers.get(h);
+        return (v ? "✓ " : "· ") + h + ": " + (v || "(not visible to JS)");
+      });
+      const found = expected.filter((h) => r.headers.get(h)).length;
+      setStatus("headers", found >= 2 ? "ok" : "wait", found + "/" + expected.length + " visible");
+      out("headers", lines.join("\n") + "\n\nBrowsers hide some security headers from fetch(). If one shows '(not visible to JS)', confirm it in DevTools → Network.");
+    } catch (e) { setStatus("headers", "fail", "network error"); out("headers", "Request failed: " + e.message); }
   }
 
-  // --- 4. AB TEST cookie ---
   async function testAbtest() {
-    setStatus("abtest", "wait", "testing...");
+    setStatus("abtest", "wait", "testing…");
     try {
       await fetch(ORIGIN + "/lab/", { cache: "no-store", credentials: "include" });
       const m = document.cookie.match(/abtest=([AB])/);
       if (m) {
         setStatus("abtest", "ok", "group " + m[1] + " ✓");
-        out("abtest", "Cookie found: abtest=" + m[1] +
-          "\nThe edge (viewer-response) assigned the viewer to an A/B group.");
+        out("abtest", "Cookie found: abtest=" + m[1] + "\nThe viewer-response function assigned you to an A/B group.");
       } else {
-        setStatus("abtest", "wait", "no visible cookie");
-        out("abtest", "document.cookie: " + (document.cookie || "(empty)") +
-          "\n\nNote: if the cookie is HttpOnly, JS cannot see it — check DevTools > Application > Cookies.");
+        setStatus("abtest", "wait", "not visible to JS");
+        out("abtest", "document.cookie = " + (document.cookie || "(empty)") + "\n\nThe cookie may be HttpOnly (invisible to JavaScript). Check DevTools → Application → Cookies for 'abtest'.");
       }
-    } catch (e) {
-      setStatus("abtest", "fail", "error");
-      out("abtest", "Failed: " + e.message);
-    }
+    } catch (e) { setStatus("abtest", "fail", "network error"); out("abtest", "Request failed: " + e.message); }
   }
 
-  // --- 5. API ---
   async function testApi() {
-    setStatus("api", "wait", "calling...");
+    setStatus("api", "wait", "calling…");
     try {
       const r = await fetch(ORIGIN + "/api/hello", { cache: "no-store" });
       const txt = await r.text();
-      if (r.ok) {
-        setStatus("api", "ok", r.status + " ✓");
-        let pretty = txt;
-        try { pretty = JSON.stringify(JSON.parse(txt), null, 2); } catch (_) {}
-        out("api", "Status: " + r.status + "\n" + pretty);
-      } else {
-        setStatus("api", "fail", r.status);
-        out("api", "Status: " + r.status + "\n" + txt);
-      }
-    } catch (e) {
-      setStatus("api", "fail", "error");
-      out("api", "Failed: " + e.message);
-    }
+      let pretty = txt; try { pretty = JSON.stringify(JSON.parse(txt), null, 2); } catch (_) {}
+      setStatus("api", r.ok ? "ok" : "fail", r.status + (r.ok ? " ✓" : ""));
+      out("api", "HTTP " + r.status + "\n" + pretty);
+    } catch (e) { setStatus("api", "fail", "network error"); out("api", "Request failed: " + e.message); }
   }
 
-  const TESTS = {
-    "auth-sem": testAuthSem, rewrite: testRewrite, headers: testHeaders,
-    abtest: testAbtest, api: testApi,
-  };
+  async function testSigned() {
+    setStatus("signed", "wait", "testing…");
+    try {
+      const r = await fetch(ORIGIN + "/premium/secret.html", { cache: "no-store" });
+      if (r.status === 403) {
+        setStatus("signed", "ok", "403 — protected ✓");
+        out("signed", "HTTP 403 (MissingKey)\nThe content refused an unsigned request — the signed-URL protection is working as intended.");
+      } else {
+        setStatus("signed", "fail", r.status + " — expected 403");
+        out("signed", "HTTP " + r.status + "\nExpected 403. Without a valid signature this path should be refused.");
+      }
+    } catch (e) { setStatus("signed", "fail", "network error"); out("signed", "Request failed: " + e.message); }
+  }
 
-  document.querySelectorAll("button[data-test]").forEach((b) => {
-    b.addEventListener("click", () => TESTS[b.dataset.test]());
-  });
-  document.getElementById("auth-com").addEventListener("click", () => {
-    // embed the credentials in the URL so the browser opens authenticated
+  const TESTS = { auth: testAuth, rewrite: testRewrite, headers: testHeaders,
+                  abtest: testAbtest, api: testApi, signed: testSigned };
+
+  document.querySelectorAll("button[data-test]").forEach((b) =>
+    b.addEventListener("click", () => TESTS[b.dataset.test]()));
+  document.getElementById("auth-with").addEventListener("click", () => {
     const u = new URL(ORIGIN + "/");
     window.open("https://demo:demo@" + u.host + "/", "_blank");
   });
-  document.getElementById("open-protected").addEventListener("click", () => {
-    window.open(ORIGIN + "/", "_blank");
-  });
+  document.getElementById("open-protected").addEventListener("click", () =>
+    window.open(ORIGIN + "/", "_blank"));
   document.getElementById("run-all").addEventListener("click", async () => {
-    await testAuthSem(); await testRewrite(); await testHeaders();
-    await testAbtest(); await testApi();
+    await testAuth(); await testRewrite(); await testHeaders();
+    await testAbtest(); await testApi(); await testSigned();
   });
 </script>
 </body>
