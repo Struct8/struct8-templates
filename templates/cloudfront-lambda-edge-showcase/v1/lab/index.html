@@ -179,6 +179,31 @@
 
 </main>
 
+<section class="gallery" id="c-gallery">
+  <div class="card-top">
+    <span class="num">★</span>
+    <h3>Image gallery — public vs private</h3>
+    <span class="trigger-tag">signed URL / key group</span>
+  </div>
+  <div class="explain">
+    <p><span class="what">What it is:</span> a real use case for the signed-URL
+    protection above. The same S3 bucket holds <b>public</b> images under
+    <code class="inline">/public/*</code> and <b>private</b> images under
+    <code class="inline">/private/*</code>. The public path is served by an open
+    behavior; the private path sits behind the CloudFront <b>trusted key group</b>.</p>
+    <p><span class="what">What this checks:</span> public images load and download
+    for everyone. Private images are refused with <b>403</b> unless the request
+    carries a valid signature — so they show a locked state here. (Fase 2 will add a
+    one-click sign-in that issues signed cookies so the private images load too.)</p>
+  </div>
+
+  <h4 class="gallery-sub">Public — free to download</h4>
+  <div class="grid" id="grid-public"></div>
+
+  <h4 class="gallery-sub">Private — subscribers only</h4>
+  <div class="grid" id="grid-private"></div>
+</section>
+
 <footer>
   <p><b>About this lab.</b> It is the test page shipped with the
   <code class="inline">cloudfront-lambda-edge-showcase</code> template. The
