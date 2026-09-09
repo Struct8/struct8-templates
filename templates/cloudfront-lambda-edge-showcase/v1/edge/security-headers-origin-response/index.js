@@ -8,11 +8,11 @@
  * hits without invoking the function again. Classic use: inject security
  * headers (HSTS, CSP, X-Content-Type-Options...).
  *
- * NOTE (referência de decisão): para apenas ADICIONAR headers estáticos, um
- * `aws_cloudfront_response_headers_policy` faz o mesmo SEM Lambda@Edge, mais
- * barato e sem código. Use Lambda@Edge aqui quando os headers dependem de
- * lógica (valor por rota, por origem, condicional). Este handler existe como
- * exemplo do gatilho; o diagrama também mostra a policy como alternativa.
+ * NOTE (decision reference): to only ADD static headers, an
+ * `aws_cloudfront_response_headers_policy` does the same WITHOUT Lambda@Edge,
+ * cheaper and codeless. Reach for Lambda@Edge here when the headers depend on
+ * logic (value per route, per origin, conditional). This handler exists as an
+ * example of the trigger; the diagram also shows the policy as the alternative.
  *
  * Event shape: event.Records[0].cf.response
  * Return: the (modified) `response`.
