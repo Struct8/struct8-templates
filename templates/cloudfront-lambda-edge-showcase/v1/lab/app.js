@@ -129,3 +129,97 @@ document.getElementById('run-all').addEventListener('click', async function () {
   await testAuth(); await testRewrite(); await testHeaders();
   await testAbtest(); await testApi(); await testSigned();
 });
+
+// ---------------------------------------------------------------------------
+// Image gallery: public (free) vs private (signed-URL protected).
+// A real use case for the trusted key group. Public images load directly;
+// private ones are probed and reported as locked (403) until a signature is
+// present. This section is additive and does not touch the six tests above.
+// ---------------------------------------------------------------------------
+
+const PUBLIC_IMAGES = ['photo-1.svg', 'photo-2.svg', 'photo-3.svg'];
+const PRIVATE_IMAGES = ['photo-1.svg', 'photo-2.svg', 'photo-3.svg'];
+
+function galleryTile(kind, name) {
+  const url = ORIGIN + '/' + kind + '/' + name;
+  const fig = document.createElement('figure');
+  fig.className = 'tile ' + kind;
+
+  const media = document.createElement('div');
+  media.className = 'tile-media';
+  fig.appendChild(media);
+
+  const cap = document.createElement('figcaption');
+  cap.className = 'tile-cap';
+  fig.appendChild(cap);
+  return { fig, media, cap, url, name };
+}
+
+function renderPublic() {
+  const grid = document.getElementById('grid-public');
+  grid.innerHTML = '';
+  PUBLIC_IMAGES.forEach(function (name) {
+    const t = galleryTile('public', name);
+    const img = document.createElement('img');
+    img.src = t.url;
+    img.alt = name;
+    img.loading = 'lazy';
+    t.media.appendChild(img);
+
+    const a = document.createElement('a');
+    a.className = 'dl';
+    a.href = t.url;
+    a.setAttribute('download', name);
+    a.textContent = '↓ download';
+
+    const label = document.createElement('span');
+    label.textContent = '/public/' + name;
+    t.cap.appendChild(label);
+    t.cap.appendChild(a);
+    grid.appendChild(t.fig);
+  });
+}
+
+async function renderPrivate() {
+  const grid = document.getElementById('grid-private');
+  grid.innerHTML = '';
+  for (const name of PRIVATE_IMAGES) {
+    const t = galleryTile('private', name);
+    const status = document.createElement('span');
+    status.className = 'lock';
+    status.textContent = '🔒 checking…';
+    t.media.appendChild(status);
+
+    const label = document.createElement('span');
+    label.textContent = '/private/' + name;
+    t.cap.appendChild(label);
+    grid.appendChild(t.fig);
+
+    try {
+      const r = await fetch(t.url, { cache: 'no-store' });
+      if (r.status === 200) {
+        // A signature is present (Fase 2): show the real image.
+        t.media.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = t.url;
+        img.alt = name;
+        t.media.appendChild(img);
+        const a = document.createElement('a');
+        a.className = 'dl';
+        a.href = t.url;
+        a.setAttribute('download', name);
+        a.textContent = '↓ download';
+        t.cap.appendChild(a);
+      } else {
+        status.textContent = '🔒 ' + r.status + ' — locked';
+        t.fig.classList.add('locked');
+      }
+    } catch (e) {
+      status.textContent = '🔒 unreachable';
+      t.fig.classList.add('locked');
+    }
+  }
+}
+
+renderPublic();
+renderPrivate();
