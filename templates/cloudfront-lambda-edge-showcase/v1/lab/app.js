@@ -137,8 +137,8 @@ document.getElementById('run-all').addEventListener('click', async function () {
 // present. This section is additive and does not touch the six tests above.
 // ---------------------------------------------------------------------------
 
-const PUBLIC_IMAGES = ['photo-1.svg', 'photo-2.svg', 'photo-3.svg'];
-const PRIVATE_IMAGES = ['photo-1.svg', 'photo-2.svg', 'photo-3.svg'];
+const PUBLIC_IMAGES = ['photo-1.svg'];
+const PRIVATE_IMAGES = ['photo-1.svg'];
 
 function galleryTile(kind, name) {
   const url = ORIGIN + '/' + kind + '/' + name;
