@@ -52,9 +52,14 @@
       <code class="inline">/</code> requires HTTP Basic auth. Without credentials the
       edge should answer <b>401</b> before reaching the origin. With
       <code class="inline">demo:demo</code> it should let you in.</p>
+      <p><span class="what">Heads up:</span> once you sign in, the browser replays the
+      saved credentials on every request to this site, so this in-page test can report
+      <b>200</b> instead of 401. That is the browser, not the edge. To see the real
+      401, open the root in a <b>private/incognito window</b> and cancel the sign-in
+      prompt.</p>
     </div>
     <div class="actions">
-      <button class="btn-small" data-test="auth">Test without credentials → expect 401</button>
+      <button class="btn-small" data-test="auth">Test the root → expect 401 (200 if already signed in)</button>
       <button class="btn-small secondary" id="auth-with">Open with demo:demo ↗</button>
     </div>
     <pre id="out-auth"></pre>
@@ -71,13 +76,15 @@
       <p><span class="what">What it is:</span> a function on the <b>origin request</b>
       hook — it runs only on a cache miss, right before CloudFront goes to S3. Cheap,
       because its result can be cached.</p>
-      <p><span class="what">What this checks:</span> a directory path like
-      <code class="inline">/lab/anything/</code> is rewritten to
-      <code class="inline">/index.html</code> so a single-page app resolves. A
-      <b>200</b> means the rewrite worked.</p>
+      <p><span class="what">What this checks:</span>
+      <code class="inline">/lab</code> has no object of its own in S3 (the object is
+      <code class="inline">lab/index.html</code>). The origin-request function rewrites
+      it to <code class="inline">/lab/index.html</code>, so a <b>200</b> is only
+      possible because the rewrite ran. (A made-up folder would rewrite to a missing
+      object and S3 answers 403 — that tests the origin, not the rewrite.)</p>
     </div>
     <div class="actions">
-      <button class="btn-small" data-test="rewrite">Test a directory path → expect 200</button>
+      <button class="btn-small" data-test="rewrite">Test an extensionless path → expect 200</button>
     </div>
     <pre id="out-rewrite"></pre>
   </section>
