@@ -21,6 +21,13 @@ async function testAuth() {
     if (r.status === 401) {
       setStatus('auth', 'ok', '401 — blocked ✓');
       out('auth', 'HTTP 401 Unauthorized\nThe edge refused the request with no credentials, exactly as intended.');
+    } else if (r.status === 200) {
+      // Not a failure: the browser remembers Basic-auth credentials per origin and
+      // replays the Authorization header on every request, so fetch() cannot send a
+      // truly anonymous request once you have signed in. A real 401 shows only before
+      // any sign-in, or from a fresh private/incognito window.
+      setStatus('auth', 'wait', '200 — already signed in');
+      out('auth', 'HTTP 200\nThe edge let this through because your browser is replaying saved credentials for this site — fetch() cannot drop them. This does NOT mean auth is off.\n\nTo see the real 401, open a private/incognito window and load ' + ORIGIN + '/ with no credentials (Cancel the sign-in prompt).');
     } else {
       setStatus('auth', 'fail', r.status + ' — expected 401');
       out('auth', 'HTTP ' + r.status + '\nExpected 401. The viewer-request auth function may not be active on this path yet (edge propagation can take a few minutes).');
@@ -30,11 +37,17 @@ async function testAuth() {
 
 async function testRewrite() {
   setStatus('rewrite', 'wait', 'testing…');
+  // Ask for the extensionless path "/lab". There is NO S3 object at that key — the
+  // object is "lab/index.html". So a 200 is only possible because the origin-request
+  // rewrite turned "/lab" into "/lab/index.html" before CloudFront reached S3. That is
+  // what makes this a real test of the rewrite and not of a pre-existing object.
+  // (A made-up folder like "/lab/x/" rewrites to a missing object and S3+OAC answers
+  // 403 — that would test the origin, not the rewrite.)
   try {
-    const r = await fetch(ORIGIN + '/lab/does-not-exist/', { cache: 'no-store' });
+    const r = await fetch(ORIGIN + '/lab', { cache: 'no-store' });
     if (r.ok) {
       setStatus('rewrite', 'ok', r.status + ' — resolved ✓');
-      out('rewrite', 'HTTP ' + r.status + '\nA directory-style path resolved to index.html — the origin-request rewrite is working.');
+      out('rewrite', 'HTTP ' + r.status + '\n"/lab" has no object of its own in S3 — the object is "lab/index.html". This 200 is only possible because the origin-request function rewrote "/lab" to "/lab/index.html". The rewrite is working.');
     } else {
       setStatus('rewrite', 'fail', r.status);
       out('rewrite', 'HTTP ' + r.status + '\nExpected 200. Check the origin-request trigger on the /lab/* behavior.');
