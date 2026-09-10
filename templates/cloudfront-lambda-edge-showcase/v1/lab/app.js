@@ -198,9 +198,14 @@ async function renderPrivate() {
     grid.appendChild(t.fig);
 
     try {
-      const r = await fetch(t.url, { cache: 'no-store' });
+      // Only treat the image as unlocked when the user has signed in DURING this
+      // page session. A leftover signed cookie from an earlier login can still be
+      // valid (they last ~1h) and would make the fetch return 200 while the UI says
+      // "not signed in" — showing a misleading download link. Gating on `signedIn`
+      // keeps the two states consistent.
+      const r = signedIn ? await fetch(t.url, { cache: 'no-store' }) : { status: 403 };
       if (r.status === 200) {
-        // A signature is present (Fase 2): show the real image.
+        // Signed in and the signature is valid: show the real image + download.
         t.media.innerHTML = '';
         const img = document.createElement('img');
         img.src = t.url;
@@ -213,7 +218,7 @@ async function renderPrivate() {
         a.textContent = '↓ download';
         t.cap.appendChild(a);
       } else {
-        status.textContent = '🔒 ' + r.status + ' — locked';
+        status.textContent = signedIn ? '🔒 ' + r.status + ' — locked' : '🔒 sign in to unlock';
         t.fig.classList.add('locked');
       }
     } catch (e) {
@@ -222,6 +227,12 @@ async function renderPrivate() {
     }
   }
 }
+
+// Whether the user signed in during THIS page session. Starts false: on load the
+// private tiles show locked, regardless of any leftover cookie, so the UI never
+// contradicts itself. A signed cookie alone still controls real access at the
+// edge; this flag only controls what the gallery offers.
+let signedIn = false;
 
 renderPublic();
 renderPrivate();
@@ -263,6 +274,7 @@ if (loginBtn) {
           document.cookie = 'CloudFront-Signature=' + data.cookies['CloudFront-Signature'] + attrs;
           document.cookie = 'CloudFront-Key-Pair-Id=' + data.cookies['CloudFront-Key-Pair-Id'] + attrs;
         }
+        signedIn = true;
         setAuthState('signed in — private unlocked', true);
         await renderPrivate(); // cookies now present -> images load
       } else {
@@ -285,6 +297,7 @@ if (logoutBtn) {
     document.cookie = 'CloudFront-Policy' + clear;
     document.cookie = 'CloudFront-Signature' + clear;
     document.cookie = 'CloudFront-Key-Pair-Id' + clear;
+    signedIn = false;
     setAuthState('not signed in', false);
     await renderPrivate(); // cookies cleared -> back to locked
   });
