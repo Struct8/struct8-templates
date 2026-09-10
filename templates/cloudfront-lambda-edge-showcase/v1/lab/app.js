@@ -223,3 +223,51 @@ async function renderPrivate() {
 
 renderPublic();
 renderPrivate();
+
+// ---------------------------------------------------------------------------
+// Sign-in for the private gallery. POST /api/login issues CloudFront signed
+// cookies scoped to /private/*; the browser then sends them automatically, so
+// re-rendering the private grid shows the images (200 instead of 403).
+// ---------------------------------------------------------------------------
+
+function setAuthState(text, ok) {
+  const el = document.getElementById('gallery-auth-state');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'auth-state' + (ok ? ' ok' : '');
+}
+
+const loginBtn = document.getElementById('gallery-login');
+if (loginBtn) {
+  loginBtn.addEventListener('click', async function () {
+    setAuthState('signing in…', false);
+    try {
+      const r = await fetch(ORIGIN + '/api/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ user: 'demo', pass: 'demo' }),
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      if (r.ok) {
+        setAuthState('signed in — private unlocked', true);
+        await renderPrivate(); // cookies now present -> images load
+      } else {
+        setAuthState('sign-in failed (' + r.status + ')', false);
+      }
+    } catch (e) {
+      setAuthState('sign-in error: ' + e.message, false);
+    }
+  });
+}
+
+const logoutBtn = document.getElementById('gallery-logout');
+if (logoutBtn) {
+  logoutBtn.addEventListener('click', async function () {
+    try {
+      await fetch(ORIGIN + '/api/logout', { credentials: 'include', cache: 'no-store' });
+    } catch (_) { /* ignore */ }
+    setAuthState('not signed in', false);
+    await renderPrivate(); // cookies cleared -> back to locked
+  });
+}
