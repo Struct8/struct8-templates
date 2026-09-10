@@ -157,6 +157,7 @@ function galleryTile(kind, name) {
 
 function renderPublic() {
   const grid = document.getElementById('grid-public');
+  if (!grid) return; // gallery section not present (e.g. stale cached HTML)
   grid.innerHTML = '';
   PUBLIC_IMAGES.forEach(function (name) {
     const t = galleryTile('public', name);
@@ -182,6 +183,7 @@ function renderPublic() {
 
 async function renderPrivate() {
   const grid = document.getElementById('grid-private');
+  if (!grid) return; // gallery section not present (e.g. stale cached HTML)
   grid.innerHTML = '';
   for (const name of PRIVATE_IMAGES) {
     const t = galleryTile('private', name);

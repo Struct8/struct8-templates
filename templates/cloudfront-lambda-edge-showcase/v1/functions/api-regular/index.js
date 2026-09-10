@@ -95,11 +95,13 @@ function signCookies(privateKeyPem, resource, expires) {
 
 function cookieAttrs() {
   // Scope the cookies to /private so they are only sent for protected content.
-  // Secure + SameSite=Lax; a Domain is set when provided so the cookies apply to
-  // the distribution host.
-  let attrs = 'Path=/private; Secure; SameSite=Lax';
-  if (COOKIE_DOMAIN) attrs += '; Domain=' + COOKIE_DOMAIN;
-  return attrs;
+  // IMPORTANT: do NOT set a Domain attribute. cloudfront.net is on the Public
+  // Suffix List, so browsers reject cookies that carry Domain=*.cloudfront.net
+  // (anti-supercookie protection) and drop them silently. Without Domain the
+  // cookie is host-only: the browser stores it for this exact distribution host
+  // and sends it back same-host, which is what the lab needs. (With a custom
+  // domain you could scope it with Domain; on *.cloudfront.net you must not.)
+  return 'Path=/private; Secure; SameSite=Lax';
 }
 
 async function handleLogin(event) {
