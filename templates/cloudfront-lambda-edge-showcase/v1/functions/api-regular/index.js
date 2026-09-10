@@ -139,8 +139,11 @@ async function handleLogin(event) {
     });
   }
 
-  const host =
-    (event.headers && (event.headers.host || event.headers.Host)) || COOKIE_DOMAIN;
+  // The signed policy must name the DISTRIBUTION host, not the origin host. When
+  // the request comes through CloudFront to API Gateway, event.headers.host is the
+  // API Gateway host, which would sign a resource that never matches the real
+  // /private URL. Use COOKIE_DOMAIN (the distribution domain) as the source of truth.
+  const host = COOKIE_DOMAIN || (event.headers && (event.headers.host || event.headers.Host));
   const resource = 'https://' + host + '/private/*';
   const expires = Math.floor(Date.now() / 1000) + COOKIE_TTL_SECONDS;
 
