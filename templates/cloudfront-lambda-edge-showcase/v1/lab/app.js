@@ -252,6 +252,17 @@ if (loginBtn) {
         cache: 'no-store',
       });
       if (r.ok) {
+        // Set the signed cookies from the JSON body. The API also returns them as
+        // Set-Cookie, but that header can be dropped on the CloudFront -> API Gateway
+        // path; setting them here with document.cookie does not depend on that. They
+        // are scoped to /private so the browser sends them only for protected content.
+        const data = await r.json();
+        if (data && data.cookies) {
+          const attrs = '; path=/private; secure; samesite=lax; max-age=' + (data.expiresIn || 3600);
+          document.cookie = 'CloudFront-Policy=' + data.cookies['CloudFront-Policy'] + attrs;
+          document.cookie = 'CloudFront-Signature=' + data.cookies['CloudFront-Signature'] + attrs;
+          document.cookie = 'CloudFront-Key-Pair-Id=' + data.cookies['CloudFront-Key-Pair-Id'] + attrs;
+        }
         setAuthState('signed in — private unlocked', true);
         await renderPrivate(); // cookies now present -> images load
       } else {
@@ -269,6 +280,11 @@ if (logoutBtn) {
     try {
       await fetch(ORIGIN + '/api/logout', { credentials: 'include', cache: 'no-store' });
     } catch (_) { /* ignore */ }
+    // Clear the cookies client-side too (they were set with document.cookie).
+    const clear = '=; path=/private; max-age=0';
+    document.cookie = 'CloudFront-Policy' + clear;
+    document.cookie = 'CloudFront-Signature' + clear;
+    document.cookie = 'CloudFront-Key-Pair-Id' + clear;
     setAuthState('not signed in', false);
     await renderPrivate(); // cookies cleared -> back to locked
   });
