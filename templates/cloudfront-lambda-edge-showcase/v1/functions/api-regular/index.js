@@ -178,8 +178,8 @@ async function handleLogin(event) {
     return json(401, { ok: false, error: 'invalid credentials' });
   }
 
-  if (!PRIVATE_KEY_PARAM || !KEY_PAIR_ID) {
-    return json(500, { ok: false, error: 'signing not configured (PRIVATE_KEY_PARAM / KEY_PAIR_ID missing)' });
+  if (!PRIVATE_KEY_PARAM) {
+    return json(500, { ok: false, error: 'signing not configured (PRIVATE_KEY_PARAM missing)' });
   }
 
   // Resolve BOTH the distribution host and the Key-Pair-Id at runtime from the SSM
