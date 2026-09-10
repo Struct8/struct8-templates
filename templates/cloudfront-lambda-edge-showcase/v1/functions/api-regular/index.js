@@ -139,8 +139,11 @@ async function handleLogin(event) {
     });
   }
 
-  const host =
-    (event.headers && (event.headers.host || event.headers.Host)) || COOKIE_DOMAIN;
+  // The signed policy must name the DISTRIBUTION host, not the origin host. When
+  // the request comes through CloudFront to API Gateway, event.headers.host is the
+  // API Gateway host, which would sign a resource that never matches the real
+  // /private URL. Use COOKIE_DOMAIN (the distribution domain) as the source of truth.
+  const host = COOKIE_DOMAIN || (event.headers && (event.headers.host || event.headers.Host));
   const resource = 'https://' + host + '/private/*';
   const expires = Math.floor(Date.now() / 1000) + COOKIE_TTL_SECONDS;
 
@@ -155,12 +158,27 @@ async function handleLogin(event) {
     'CloudFront-Key-Pair-Id=' + keyPairId + '; ' + attrs + '; ' + maxAge,
   ];
 
-  // API Gateway v2 payload 2.0 supports a top-level `cookies` array.
+  // Two ways to deliver the signed cookies, for robustness:
+  //  1) `cookies` array -> API Gateway v2 turns it into Set-Cookie headers. This is
+  //     the clean path, but the Set-Cookie can be stripped/altered on the way through
+  //     CloudFront's /api/* behavior, so we do not rely on it alone.
+  //  2) the same three values in the JSON body -> the browser sets them with
+  //     document.cookie (they are not HttpOnly), which does not depend on the
+  //     response header surviving the CloudFront -> API Gateway path.
   return {
     statusCode: 200,
     headers: { 'content-type': 'application/json' },
     cookies,
-    body: JSON.stringify({ ok: true, scope: '/private/*', expiresIn: COOKIE_TTL_SECONDS }),
+    body: JSON.stringify({
+      ok: true,
+      scope: '/private/*',
+      expiresIn: COOKIE_TTL_SECONDS,
+      cookies: {
+        'CloudFront-Policy': policy,
+        'CloudFront-Signature': signature,
+        'CloudFront-Key-Pair-Id': keyPairId,
+      },
+    }),
   };
 }
 
