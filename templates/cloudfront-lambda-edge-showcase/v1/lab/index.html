@@ -3,20 +3,28 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>CloudFront + Lambda@Edge — Interactive Test Lab</title>
+<title>CloudFront + Lambda@Edge — Full Lab (edge triggers, API, public/private gallery)</title>
 <link rel="stylesheet" href="/lab/styles.css" />
 </head>
 <body>
 
 <header>
-  <div class="eyebrow">● Interactive test lab</div>
-  <h1>CloudFront + Lambda@Edge</h1>
+  <div class="eyebrow">● Full interactive lab — edge + API + signed access</div>
+  <h1>CloudFront + Lambda@Edge — Full Lab</h1>
   <p class="lead">
     This page runs live checks against the CloudFront distribution that serves it.
     Each card exercises one part of the stack — an edge function trigger, the dynamic
     API, or the signed-URL protection — and explains what it does and what a correct
-    result looks like. Because this page is served <b>by the same distribution</b>,
-    the checks run same-origin, so no CORS gets in the way.
+    result looks like. It also includes a <b>public/private image gallery</b>: public
+    objects download for everyone, while private objects stay behind the trusted key
+    group and unlock only after a one-click sign-in that issues CloudFront signed
+    cookies. Because this page is served <b>by the same distribution</b>, the checks
+    run same-origin, so no CORS gets in the way.
+  </p>
+  <p class="lead" style="font-size:13px;opacity:.8">
+    This is the <b>full</b> version of the lab (signed-cookie sign-in and the
+    public/private download gallery), as opposed to the earlier, simpler test page
+    that only exercised the six edge/API/signed-URL checks.
   </p>
   <div class="origin-bar">
     <span class="dot" id="origin-dot"></span>
