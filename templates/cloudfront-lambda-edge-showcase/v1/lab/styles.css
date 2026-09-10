@@ -216,3 +216,18 @@ footer b { color: var(--muted); }
   white-space: nowrap;
 }
 .tile-cap .dl:hover { text-decoration: underline; }
+
+/* ---- Gallery sign-in bar ------------------------------------------------- */
+.gallery-auth {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 18px 0 4px;
+}
+.gallery-auth .auth-state {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.gallery-auth .auth-state.ok { color: var(--ok); }

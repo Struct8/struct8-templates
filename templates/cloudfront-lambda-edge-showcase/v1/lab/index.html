@@ -192,14 +192,21 @@
     <code class="inline">/private/*</code>. The public path is served by an open
     behavior; the private path sits behind the CloudFront <b>trusted key group</b>.</p>
     <p><span class="what">What this checks:</span> public images load and download
-    for everyone. Private images are refused with <b>403</b> unless the request
-    carries a valid signature — so they show a locked state here. (Fase 2 will add a
-    one-click sign-in that issues signed cookies so the private images load too.)</p>
+    for everyone. Private images are refused with <b>403</b> until you sign in.
+    Signing in calls <code class="inline">/api/login</code>, which validates
+    <code class="inline">demo:demo</code> and issues CloudFront <b>signed cookies</b>
+    scoped to <code class="inline">/private/*</code>. The browser then sends those
+    cookies automatically, so the private images load with no per-file signing.</p>
   </div>
 
   <h4 class="gallery-sub">Public — free to download</h4>
   <div class="grid" id="grid-public"></div>
 
+  <div class="gallery-auth">
+    <button class="btn-small" id="gallery-login">Sign in (demo:demo) → unlock private</button>
+    <button class="btn-small secondary" id="gallery-logout">Sign out</button>
+    <span class="auth-state" id="gallery-auth-state">not signed in</span>
+  </div>
   <h4 class="gallery-sub">Private — subscribers only</h4>
   <div class="grid" id="grid-private"></div>
 </section>
