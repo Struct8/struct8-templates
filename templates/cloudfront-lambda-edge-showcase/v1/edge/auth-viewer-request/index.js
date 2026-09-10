@@ -28,6 +28,22 @@ exports.handler = async (event) => {
   const request = event.Records[0].cf.request;
   const headers = request.headers;
 
+  // The lab lives under /lab/* (an open behavior). A request to "/lab" WITHOUT the
+  // trailing slash does not match /lab/* and falls through to this default behavior,
+  // where it would hit the auth gate below and get a 401 before the user ever sees
+  // the lab. Redirect "/lab" -> "/lab/" here, before the auth check, so opening the
+  // lab never prompts for credentials. Only this exact path is affected.
+  if (request.uri === '/lab') {
+    return {
+      status: '301',
+      statusDescription: 'Moved Permanently',
+      headers: {
+        location: [{ key: 'Location', value: '/lab/' }],
+        'cache-control': [{ key: 'Cache-Control', value: 'max-age=3600' }],
+      },
+    };
+  }
+
   const expected =
     'Basic ' + Buffer.from(`${DEMO_USER}:${DEMO_PASS}`).toString('base64');
 
