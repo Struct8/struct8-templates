@@ -30,13 +30,22 @@ const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 
 const ssm = new SSMClient({});
 
-// Injected as environment variables (see the Lambda node in the diagram):
-//   PRIVATE_KEY_PARAM  -> name of the SSM SecureString holding the RSA private key
-//   KEY_PAIR_ID        -> id of the aws_cloudfront_public_key (e.g. K1FQMRZODJHSNZ)
-//   COOKIE_DOMAIN      -> distribution domain, for the cookie Domain attribute
+// Config. The DISTRIBUTION DOMAIN is resolved at runtime from the SSM parameter
+// the diagram fills through the CloudFront -> SSM connection, so it survives a
+// destroy/recreate without editing anything. Only stable names / a single id go
+// in env vars:
+//   PRIVATE_KEY_PARAM -> name of the SSM SecureString with the RSA private key
+//   CF_OUTPUTS_PARAM  -> name of the SSM String parameter holding the distribution
+//                        outputs (domain_name, id, ...) as JSON
+//   KEY_PAIR_ID       -> id of the aws_cloudfront_public_key (the cookie
+//                        Key-Pair-Id). This one still changes if the public key is
+//                        recreated; kept as an env var because the CloudFront SDK
+//                        client is not guaranteed in the managed runtime.
+//   COOKIE_DOMAIN     -> optional fallback if CF_OUTPUTS_PARAM is unavailable.
 const PRIVATE_KEY_PARAM = process.env.PRIVATE_KEY_PARAM || '';
+const CF_OUTPUTS_PARAM = process.env.CF_OUTPUTS_PARAM || '';
 const KEY_PAIR_ID = process.env.KEY_PAIR_ID || '';
-const COOKIE_DOMAIN = process.env.COOKIE_DOMAIN || '';
+const COOKIE_DOMAIN_FALLBACK = process.env.COOKIE_DOMAIN || '';
 
 const DEMO_USER = 'demo';
 const DEMO_PASS = 'demo';
@@ -61,6 +70,31 @@ async function getPrivateKey() {
   return cachedKey;
 }
 
+// Distribution domain, read from the SSM parameter the diagram fills from the
+// CloudFront -> SSM connection. The stored value is JSON shaped like:
+//   { "aws_cloudfront_distribution": { "<name>": { "domain_name": "...", ... } } }
+let cachedDomain = null;
+async function getDistributionDomain() {
+  if (cachedDomain) return cachedDomain;
+  if (CF_OUTPUTS_PARAM) {
+    try {
+      const out = await ssm.send(new GetParameterCommand({ Name: CF_OUTPUTS_PARAM }));
+      const parsed = JSON.parse(out.Parameter.Value || '{}');
+      const dists = parsed.aws_cloudfront_distribution || {};
+      for (const name of Object.keys(dists)) {
+        if (dists[name] && dists[name].domain_name) {
+          cachedDomain = dists[name].domain_name;
+          return cachedDomain;
+        }
+      }
+    } catch (_) { /* fall through to fallback */ }
+  }
+  cachedDomain = COOKIE_DOMAIN_FALLBACK;
+  return cachedDomain;
+}
+
+
+
 function json(statusCode, body, extraHeaders) {
   return {
     statusCode,
@@ -72,7 +106,7 @@ function json(statusCode, body, extraHeaders) {
 // Build the three CloudFront signed-cookie values for a custom policy that
 // grants access to `resource` (a URL pattern like https://host/private/*) until
 // `expires`. Returns { policy, signature, keyPairId }.
-function signCookies(privateKeyPem, resource, expires) {
+function signCookies(privateKeyPem, resource, expires, keyPairId) {
   const policy = JSON.stringify({
     Statement: [
       {
@@ -89,7 +123,7 @@ function signCookies(privateKeyPem, resource, expires) {
   return {
     policy: cfB64(Buffer.from(policy)),
     signature: cfB64(signature),
-    keyPairId: KEY_PAIR_ID,
+    keyPairId: keyPairId,
   };
 }
 
@@ -133,22 +167,21 @@ async function handleLogin(event) {
   }
 
   if (!PRIVATE_KEY_PARAM || !KEY_PAIR_ID) {
-    return json(500, {
-      ok: false,
-      error: 'signing not configured (PRIVATE_KEY_PARAM / KEY_PAIR_ID missing)',
-    });
+    return json(500, { ok: false, error: 'signing not configured (PRIVATE_KEY_PARAM / KEY_PAIR_ID missing)' });
   }
 
-  // The signed policy must name the DISTRIBUTION host, not the origin host. When
-  // the request comes through CloudFront to API Gateway, event.headers.host is the
-  // API Gateway host, which would sign a resource that never matches the real
-  // /private URL. Use COOKIE_DOMAIN (the distribution domain) as the source of truth.
-  const host = COOKIE_DOMAIN || (event.headers && (event.headers.host || event.headers.Host));
+  // Resolve the DISTRIBUTION host at runtime from the SSM outputs parameter, so it
+  // survives a destroy/recreate. The signed policy must name the distribution host,
+  // not the API Gateway host that arrives in event.headers.host through CloudFront.
+  const [key, host] = await Promise.all([getPrivateKey(), getDistributionDomain()]);
+
+  if (!host) {
+    return json(500, { ok: false, error: 'could not resolve distribution domain' });
+  }
+
   const resource = 'https://' + host + '/private/*';
   const expires = Math.floor(Date.now() / 1000) + COOKIE_TTL_SECONDS;
-
-  const key = await getPrivateKey();
-  const { policy, signature, keyPairId } = signCookies(key, resource, expires);
+  const { policy, signature, keyPairId } = signCookies(key, resource, expires, KEY_PAIR_ID);
 
   const attrs = cookieAttrs();
   const maxAge = 'Max-Age=' + COOKIE_TTL_SECONDS;
