@@ -1,23 +1,39 @@
 #!/bin/bash
-# Instance Info web page for Amazon Linux 2023.
+# Instance Info web page for Amazon Linux 2023 (x86_64 or arm64/Graviton).
 #
 # Serves a styled HTML page that reports the EC2 instance's own metadata, read
 # LIVE from the Instance Metadata Service v2 (IMDSv2, token-required) on every
 # request. Placed behind a load balancer, refreshing the page shows a different
 # instance each time -- id, AZ, subnet, private IP, instance type, disks, etc.
 #
+# The site ROOT ("/") returns the page directly with HTTP 200 (no redirect), so
+# the load balancer health check can target "/" with the default 200 matcher.
+#
 # Reusable across templates: it takes no arguments and hard-codes nothing about
 # the environment. Point an EC2/Launch Template user_data field at this file.
+#
+# Notes:
+#   - Small instances (t3.nano / t4g.nano, 512 MB) OOM-kill `dnf install`, so we
+#     add a little swap FIRST. This is the same guard the NAT bootstrap uses; the
+#     web page failing to install Apache was exactly this OOM.
 #
 # Listens on port 80.
 LOGFILE="/var/log/user-data.log"
 exec >"$LOGFILE" 2>&1
 set -x
 
+# A little swap so dnf does not get OOM-killed on a 512 MB instance.
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=512 2>/dev/null
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+fi
+
 echo "Installing Apache (httpd)..."
 dnf install -y httpd
 
-# The page is generated per-request by a CGI script so a browser refresh always
+# The page is generated per request by a CGI script so a browser refresh always
 # shows fresh metadata (and, behind a load balancer, a different instance).
 cat > /var/www/cgi-bin/info << 'CGI_EOF'
 #!/bin/bash
@@ -87,9 +103,7 @@ cat << HTML
     .dot { width: 12px; height: 12px; border-radius: 50%; background: #3fb950; box-shadow: 0 0 12px #3fb950; }
     h1 { font-size: 22px; margin: 0; font-weight: 650; letter-spacing: .2px; }
     .sub { color: #8b98a5; font-size: 13px; margin: 2px 0 24px 28px; }
-    .hero {
-      display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 26px;
-    }
+    .hero { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 26px; }
     .chip {
       background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff;
       padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
@@ -102,7 +116,6 @@ cat << HTML
       background: rgba(255,255,255,0.03); border-radius: 12px; border: 1px solid rgba(255,255,255,0.06); }
     .k { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: #8b98a5; }
     .v { font-size: 15px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
-    .v.empty { color: #6b7684; font-style: italic; }
     .full { grid-column: 1 / -1; }
     pre { margin: 0; font-size: 13px; line-height: 1.5; white-space: pre-wrap; color: #c9d5e0; }
     .foot { margin-top: 24px; display: flex; justify-content: space-between; align-items: center;
@@ -128,7 +141,7 @@ cat << HTML
       <div class="row"><span class="k">Region</span><span class="v">${REGION:-n/a}</span></div>
       <div class="row"><span class="k">Instance Type</span><span class="v">${INSTANCE_TYPE:-n/a}</span></div>
       <div class="row"><span class="k">Private IPv4</span><span class="v">${PRIVATE_IP:-n/a}</span></div>
-      <div class="row"><span class="k">Public IPv4</span><span class="v ${PUBLIC_IP:+ }${PUBLIC_IP:-empty}">${PUBLIC_IP:-none (private subnet)}</span></div>
+      <div class="row"><span class="k">Public IPv4</span><span class="v">${PUBLIC_IP:-none (private subnet)}</span></div>
       <div class="row"><span class="k">VPC</span><span class="v">${VPC_ID:-n/a}</span></div>
       <div class="row"><span class="k">Subnet</span><span class="v">${SUBNET_ID:-n/a}</span></div>
       <div class="row"><span class="k">Local Hostname</span><span class="v">${HOSTNAME_LOCAL:-n/a}</span></div>
@@ -145,7 +158,7 @@ cat << HTML
 
     <div class="foot">
       <span>Uptime: $UPTIME</span>
-      <a class="refresh" href="/cgi-bin/info">&#8635; Refresh</a>
+      <a class="refresh" href="/">&#8635; Refresh</a>
       <span>Rendered $NOW</span>
     </div>
   </div>
@@ -156,13 +169,20 @@ CGI_EOF
 
 chmod +x /var/www/cgi-bin/info
 
-# Make "/" serve the CGI page instead of the default Apache test page.
+# Serve the CGI at the site ROOT so "GET /" returns 200 directly (no redirect).
+# ScriptAlias maps every request under / to the info script; the LB health check
+# can then use the default path "/" with the default 200 matcher.
 cat > /etc/httpd/conf.d/instance-info.conf << 'CONF_EOF'
-# Redirect the site root to the live info CGI.
-RedirectMatch ^/$ /cgi-bin/info
+# Run the info CGI for the site root and everything under it.
+ScriptAlias / "/var/www/cgi-bin/info"
+<Directory "/var/www/cgi-bin">
+    AllowOverride None
+    Options +ExecCGI
+    Require all granted
+</Directory>
 CONF_EOF
 
 echo "Enabling and starting Apache..."
 systemctl enable --now httpd
 
-echo "Done. Instance info page is live on port 80 (root redirects to /cgi-bin/info)."
+echo "Done. Instance info page is live on port 80 (served directly at /)."
