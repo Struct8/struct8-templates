@@ -73,24 +73,36 @@ async function getPrivateKey() {
 // Distribution domain, read from the SSM parameter the diagram fills from the
 // CloudFront -> SSM connection. The stored value is JSON shaped like:
 //   { "aws_cloudfront_distribution": { "<name>": { "domain_name": "...", ... } } }
-let cachedDomain = null;
-async function getDistributionDomain() {
-  if (cachedDomain) return cachedDomain;
+// Read the CloudFront outputs the diagram writes into the SSM parameter through
+// the CloudFront -> SSM and public-key -> SSM connections. The stored value is
+// JSON shaped like:
+//   {
+//     "aws_cloudfront_distribution": { "<name>": { "domain_name": "...", ... } },
+//     "aws_cloudfront_public_key":   { "<name>": { "id": "...", ... } }
+//   }
+// Reading both here means neither the distribution domain nor the Key-Pair-Id is
+// hardcoded, so they survive a destroy/recreate.
+let cachedOutputs = null;
+async function getCfOutputs() {
+  if (cachedOutputs) return cachedOutputs;
+  let domain = COOKIE_DOMAIN_FALLBACK;
+  let keyPairId = KEY_PAIR_ID;
   if (CF_OUTPUTS_PARAM) {
     try {
       const out = await ssm.send(new GetParameterCommand({ Name: CF_OUTPUTS_PARAM }));
       const parsed = JSON.parse(out.Parameter.Value || '{}');
       const dists = parsed.aws_cloudfront_distribution || {};
       for (const name of Object.keys(dists)) {
-        if (dists[name] && dists[name].domain_name) {
-          cachedDomain = dists[name].domain_name;
-          return cachedDomain;
-        }
+        if (dists[name] && dists[name].domain_name) { domain = dists[name].domain_name; break; }
       }
-    } catch (_) { /* fall through to fallback */ }
+      const keys = parsed.aws_cloudfront_public_key || {};
+      for (const name of Object.keys(keys)) {
+        if (keys[name] && keys[name].id) { keyPairId = keys[name].id; break; }
+      }
+    } catch (_) { /* fall through to fallbacks */ }
   }
-  cachedDomain = COOKIE_DOMAIN_FALLBACK;
-  return cachedDomain;
+  cachedOutputs = { domain, keyPairId };
+  return cachedOutputs;
 }
 
 
@@ -170,18 +182,21 @@ async function handleLogin(event) {
     return json(500, { ok: false, error: 'signing not configured (PRIVATE_KEY_PARAM / KEY_PAIR_ID missing)' });
   }
 
-  // Resolve the DISTRIBUTION host at runtime from the SSM outputs parameter, so it
-  // survives a destroy/recreate. The signed policy must name the distribution host,
-  // not the API Gateway host that arrives in event.headers.host through CloudFront.
-  const [key, host] = await Promise.all([getPrivateKey(), getDistributionDomain()]);
+  // Resolve BOTH the distribution host and the Key-Pair-Id at runtime from the SSM
+  // outputs parameter, so neither is hardcoded and both survive a destroy/recreate.
+  // The signed policy must name the distribution host, not the API Gateway host that
+  // arrives in event.headers.host through CloudFront.
+  const [key, outputs] = await Promise.all([getPrivateKey(), getCfOutputs()]);
+  const host = outputs.domain;
+  const kpid = outputs.keyPairId;
 
-  if (!host) {
-    return json(500, { ok: false, error: 'could not resolve distribution domain' });
+  if (!host || !kpid) {
+    return json(500, { ok: false, error: 'could not resolve distribution domain or key-pair-id from SSM outputs' });
   }
 
   const resource = 'https://' + host + '/private/*';
   const expires = Math.floor(Date.now() / 1000) + COOKIE_TTL_SECONDS;
-  const { policy, signature, keyPairId } = signCookies(key, resource, expires, KEY_PAIR_ID);
+  const { policy, signature, keyPairId } = signCookies(key, resource, expires, kpid);
 
   const attrs = cookieAttrs();
   const maxAge = 'Max-Age=' + COOKIE_TTL_SECONDS;
