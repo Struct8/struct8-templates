@@ -65,6 +65,11 @@ import { Rate } from 'k6/metrics';
 const TARGET_URL = __ENV.TARGET_URL || 'http://localhost/';
 const VUS = parseInt(__ENV.VUS || '10', 10);
 const DURATION = __ENV.DURATION || '30s';
+// HTTP method. Default GET. Set METHOD=POST for targets whose work endpoint
+// only answers POST -- the Struct8 Hub load-test endpoint is one of them
+// (POST /loadtest?ms=N; a GET there returns 405 and every check fails).
+const METHOD = (__ENV.METHOD || 'GET').toUpperCase();
+const BODY = __ENV.BODY || '';
 // Optional fixed request rate. When RPS is set the test holds that arrival
 // rate regardless of latency, which is the honest way to measure a system
 // under a known load. When it is unset the VUs loop as fast as they can.
@@ -99,7 +104,9 @@ export const options = RPS > 0
     };
 
 export default function () {
-  const res = http.get(TARGET_URL);
+  const res = METHOD === 'POST'
+    ? http.post(TARGET_URL, BODY)
+    : http.request(METHOD, TARGET_URL);
   const ok = check(res, {
     'status is 2xx/3xx': (r) => r.status >= 200 && r.status < 400,
   });
@@ -149,7 +156,9 @@ fi
 DASHBOARD_PORT="${DASHBOARD_PORT:-5665}"
 echo "k6 -> ${TARGET_URL}  (VUS=${VUS:-10} DURATION=${DURATION:-30s} RPS=${RPS:-unset}) on ${K6_PLATFORM:-native}"
 echo "Live dashboard on port ${DASHBOARD_PORT} while the test runs."
-mkdir -p /opt/k6/report
+# The grafana/k6 container runs as a non-root uid, so the report directory
+# has to be world-writable or the HTML export fails with permission denied.
+mkdir -p /opt/k6/report && chmod 777 /opt/k6/report
 exec docker run --rm -i \
   ${K6_PLATFORM:+--platform "${K6_PLATFORM}"} \
   -p "${DASHBOARD_PORT}:${DASHBOARD_PORT}" \
@@ -157,6 +166,8 @@ exec docker run --rm -i \
   -e VUS="${VUS:-10}" \
   -e DURATION="${DURATION:-30s}" \
   ${RPS:+-e RPS="${RPS}"} \
+  -e METHOD="${METHOD:-GET}" \
+  ${BODY:+-e BODY="${BODY}"} \
   -e K6_WEB_DASHBOARD=true \
   -e K6_WEB_DASHBOARD_HOST=0.0.0.0 \
   -e K6_WEB_DASHBOARD_PORT="${DASHBOARD_PORT}" \
