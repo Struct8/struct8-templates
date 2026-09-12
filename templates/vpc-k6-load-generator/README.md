@@ -59,6 +59,19 @@ target without a redeploy.
 Thresholds: p95 latency under 1000 ms and error rate under 1%. k6 exits non-zero
 when a threshold is breached, which the agent reads back through `debug_result`.
 
+## Live web dashboard
+
+The run serves k6's built-in **web dashboard** on port `5665` while the test runs — live
+charts of VUs, request rate, response times, errors and checks. The container binds it to
+`0.0.0.0` (not the default `127.0.0.1`, which is unreachable from outside the container) and
+a final HTML report is written to `/opt/k6/report/index.html` so it survives the run.
+`DASHBOARD_PORT` overrides the port.
+
+Reaching it from the internet, when the generator sits in a private subnet, is done through
+a NAT instance doing a port-forward (`FORWARD_PORT=5665`, `FORWARD_TARGET=<generator private
+IP>`): browse `http://<NAT public IP>:5665`. That exposure is for a disposable test
+environment — the dashboard has no auth, so do not leave it open on a long-lived setup.
+
 ## Network shape
 
 - VPC `10.60.0.0/16`, one public subnet `10.60.1.0/24`

@@ -142,14 +142,27 @@ if [ -z "${TARGET_URL:-}" ]; then
   exit 1
 fi
 
+# The k6 web dashboard is served WHILE the test runs, on port 5665. It must
+# bind 0.0.0.0 (not the default 127.0.0.1), because it runs inside the container
+# and is reached from outside the instance; the port is published from the
+# container, and a final HTML report is written so it survives the run.
+DASHBOARD_PORT="${DASHBOARD_PORT:-5665}"
 echo "k6 -> ${TARGET_URL}  (VUS=${VUS:-10} DURATION=${DURATION:-30s} RPS=${RPS:-unset}) on ${K6_PLATFORM:-native}"
+echo "Live dashboard on port ${DASHBOARD_PORT} while the test runs."
+mkdir -p /opt/k6/report
 exec docker run --rm -i \
   ${K6_PLATFORM:+--platform "${K6_PLATFORM}"} \
+  -p "${DASHBOARD_PORT}:${DASHBOARD_PORT}" \
   -e TARGET_URL="${TARGET_URL}" \
   -e VUS="${VUS:-10}" \
   -e DURATION="${DURATION:-30s}" \
   ${RPS:+-e RPS="${RPS}"} \
-  grafana/k6 run - < /opt/k6/scripts/load-test.js
+  -e K6_WEB_DASHBOARD=true \
+  -e K6_WEB_DASHBOARD_HOST=0.0.0.0 \
+  -e K6_WEB_DASHBOARD_PORT="${DASHBOARD_PORT}" \
+  -e K6_WEB_DASHBOARD_EXPORT=/report/index.html \
+  -v /opt/k6/report:/report \
+  grafana/k6 run --out web-dashboard - < /opt/k6/scripts/load-test.js
 RUNEOF
 chmod +x /opt/k6/run.sh
 
