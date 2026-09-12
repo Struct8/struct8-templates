@@ -61,6 +61,13 @@ if [ -n "${FORWARD_PORT:-}" ] && [ -n "${FORWARD_TARGET:-}" ]; then
   iptables -t nat -A PREROUTING -i "$PRIMARY_IF" -p tcp --dport "$FORWARD_PORT" \
     -j DNAT --to-destination "${FORWARD_TARGET}:${FORWARD_PORT}"
   iptables -A FORWARD -p tcp -d "$FORWARD_TARGET" --dport "$FORWARD_PORT" -j ACCEPT
+  # SNAT the forwarded traffic so the target replies to THIS instance, not to
+  # the original client. Without it the target answers the client's real IP
+  # directly, the reply does not match the client's TCP session with the NAT,
+  # and the connection hangs -- the classic DNAT-without-SNAT hairpin. With it,
+  # the target sees the NAT as the source and its reply returns through here.
+  iptables -t nat -A POSTROUTING -p tcp -d "$FORWARD_TARGET" --dport "$FORWARD_PORT" \
+    -o "$PRIMARY_IF" -j MASQUERADE
 fi
 
 # Persist rules across reboot without the heavy iptables-services package.
