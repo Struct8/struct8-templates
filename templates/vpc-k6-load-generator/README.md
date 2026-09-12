@@ -25,6 +25,13 @@ It installs Docker, pulls the `grafana/k6` image, writes a parametrized k6 test 
 **not** run a test on boot: load starts only when someone fires it through
 Struct8 Debug Access.
 
+**Architecture-neutral.** The script assumes no CPU: it detects the architecture
+at boot (`x86_64` or `arm64`), maps it to the Docker platform, and pulls the
+multi-arch `grafana/k6` image for exactly that platform. So the instance family
+can be x86 (`t3`) or Graviton (`t4g`) with no change to this script — only the
+EC2's AMI filter has to match the family's architecture (`...-x86_64` vs
+`...-arm64`), which is a diagram setting, not a script one.
+
 ## How a test is fired
 
 Through Debug Access at the `shell` access level (the canvas owner picks it in the

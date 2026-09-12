@@ -1,6 +1,12 @@
 #!/bin/bash
 # k6 load generator on Amazon Linux 2023.
 #
+# Architecture-neutral: it runs unchanged on x86_64 and on arm64 (Graviton,
+# e.g. t4g), because it assumes no CPU. The Docker platform is detected at boot
+# and grafana/k6 (a multi-arch image) is pulled for exactly that platform. So
+# swapping the instance family -- and its matching AMI -- does not require a
+# script change.
+#
 # Boots Docker, pulls the grafana/k6 image, and drops a ready-to-run k6 test
 # script on disk. It does NOT run a test on boot: the test is fired on demand by
 # an agent (or a person) through Struct8 Debug Access / SSM, so that load starts
@@ -26,8 +32,26 @@ dnf install -y docker
 systemctl enable docker
 systemctl start docker
 
-echo "Pulling the k6 image..."
-docker pull grafana/k6:latest
+# Architecture-aware: this script must boot on both x86_64 and arm64 (Graviton),
+# so nothing here assumes a CPU. We detect the arch, map it to the Docker
+# platform string, and pull grafana/k6 for exactly that platform -- grafana/k6
+# is a multi-arch image, so the right layers are fetched instead of relying on
+# the daemon guessing. If a platform ever has no manifest, we fail loudly here
+# rather than at `docker run` time.
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64)  K6_PLATFORM="linux/amd64" ;;
+  aarch64|arm64) K6_PLATFORM="linux/arm64" ;;
+  *)             echo "Unsupported CPU architecture: $ARCH" >&2; exit 1 ;;
+esac
+echo "Detected architecture: $ARCH -> Docker platform $K6_PLATFORM"
+echo "$K6_PLATFORM" > /opt/k6/platform 2>/dev/null || { mkdir -p /opt/k6; echo "$K6_PLATFORM" > /opt/k6/platform; }
+
+echo "Pulling the k6 image for $K6_PLATFORM..."
+if ! docker pull --platform "$K6_PLATFORM" grafana/k6:latest; then
+  echo "Failed to pull grafana/k6:latest for $K6_PLATFORM. No image for this architecture?" >&2
+  exit 1
+fi
 
 echo "Writing the k6 test script..."
 mkdir -p /opt/k6/scripts
@@ -100,13 +124,27 @@ set -euo pipefail
 
 [ -f /etc/struct8_env ] && source /etc/struct8_env
 
+# Run on the same platform the image was pulled for (x86_64 or arm64). The
+# platform was detected at boot and saved to /opt/k6/platform; fall back to the
+# live arch if that file is missing.
+if [ -f /opt/k6/platform ]; then
+  K6_PLATFORM="$(cat /opt/k6/platform)"
+else
+  case "$(uname -m)" in
+    x86_64|amd64)  K6_PLATFORM="linux/amd64" ;;
+    aarch64|arm64) K6_PLATFORM="linux/arm64" ;;
+    *)             K6_PLATFORM="" ;;
+  esac
+fi
+
 if [ -z "${TARGET_URL:-}" ]; then
   echo "TARGET_URL is required. Example: TARGET_URL=https://your-service/ /opt/k6/run.sh" >&2
   exit 1
 fi
 
-echo "k6 -> ${TARGET_URL}  (VUS=${VUS:-10} DURATION=${DURATION:-30s} RPS=${RPS:-unset})"
+echo "k6 -> ${TARGET_URL}  (VUS=${VUS:-10} DURATION=${DURATION:-30s} RPS=${RPS:-unset}) on ${K6_PLATFORM:-native}"
 exec docker run --rm -i \
+  ${K6_PLATFORM:+--platform "${K6_PLATFORM}"} \
   -e TARGET_URL="${TARGET_URL}" \
   -e VUS="${VUS:-10}" \
   -e DURATION="${DURATION:-30s}" \
