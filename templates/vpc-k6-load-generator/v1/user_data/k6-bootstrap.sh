@@ -8,18 +8,28 @@
 # script change.
 #
 # Boots Docker, pulls the grafana/k6 image, and drops a ready-to-run k6 test
-# script on disk. It does NOT run a test on boot: the test is fired on demand by
-# an agent (or a person) through Struct8 Debug Access / SSM, so that load starts
-# only when someone asks for it.
+# script on disk. Two ways to run it:
+#
+#  1. ON A TIMER, with no agent (default). A systemd timer fires the default
+#     plan once, STARTUP_DELAY seconds after boot -- the delay lets the target
+#     come up first. This is what a user without an agent gets out of the box.
+#
+#  2. ON DEMAND, driven by an agent (or a person) through Struct8 Debug Access:
+#     `/opt/k6/run.sh` with env vars. The agent uses this to tailor the plan --
+#     change the load, duration or target per run, or iterate on results.
+#
+# The default plan is defined by three node environment variables, so a user
+# shapes it from the diagram and an agent can override it live:
+#   STARTUP_DELAY  seconds to wait after boot before the auto-run   (default 360)
+#   DURATION       total test time                                  (default 5m)
+#   VUS            load, in virtual users                           (default 20)
+# plus TARGET_URL, METHOD, RPS. Set AUTOSTART=off to disable the timer and keep
+# the generator idle until something calls /opt/k6/run.sh.
 #
 # This template ships its own VPC and a public subnet, so the generator is not
-# tied to any particular target. The endpoint under test is passed per run as
-# TARGET_URL:
+# tied to any particular target. The endpoint under test is TARGET_URL.
 #   TARGET_URL=https://your-service.example.com/ /opt/k6/run.sh
 #   RPS=200 VUS=100 DURATION=5m TARGET_URL=https://... /opt/k6/run.sh
-#
-# TARGET_URL, VUS, DURATION and RPS are read by the script from the environment,
-# so the same script covers every scenario without an edit or a redeploy.
 LOGFILE="/var/log/user-data.log"
 exec >$LOGFILE 2>&1
 set -x
@@ -154,7 +164,11 @@ fi
 # and is reached from outside the instance; the port is published from the
 # container, and a final HTML report is written so it survives the run.
 DASHBOARD_PORT="${DASHBOARD_PORT:-5665}"
-echo "k6 -> ${TARGET_URL}  (VUS=${VUS:-10} DURATION=${DURATION:-30s} RPS=${RPS:-unset}) on ${K6_PLATFORM:-native}"
+# Default plan: 20 VUs for 5m (matches the documented STARTUP_DELAY/DURATION/VUS
+# knobs). An agent overrides any of these per run by exporting them first.
+VUS="${VUS:-20}"
+DURATION="${DURATION:-5m}"
+echo "k6 -> ${TARGET_URL}  (VUS=${VUS} DURATION=${DURATION} RPS=${RPS:-unset}) on ${K6_PLATFORM:-native}"
 echo "Live dashboard on port ${DASHBOARD_PORT} while the test runs."
 # The grafana/k6 container runs as a non-root uid, so the report directory
 # has to be world-writable or the HTML export fails with permission denied.
@@ -163,8 +177,8 @@ exec docker run --rm -i \
   ${K6_PLATFORM:+--platform "${K6_PLATFORM}"} \
   -p "${DASHBOARD_PORT}:${DASHBOARD_PORT}" \
   -e TARGET_URL="${TARGET_URL}" \
-  -e VUS="${VUS:-10}" \
-  -e DURATION="${DURATION:-30s}" \
+  -e VUS="${VUS}" \
+  -e DURATION="${DURATION}" \
   ${RPS:+-e RPS="${RPS}"} \
   -e METHOD="${METHOD:-GET}" \
   ${BODY:+-e BODY="${BODY}"} \
@@ -177,5 +191,54 @@ exec docker run --rm -i \
 RUNEOF
 chmod +x /opt/k6/run.sh
 
+# ---------------------------------------------------------------------------
+# Auto-start: run the default plan once, on a timer, for users without an agent.
+# ---------------------------------------------------------------------------
+# Read the three plan knobs (and the switch) from the node environment. The
+# generator writes them as `export KEY = "value"` (spaces + quotes), which is
+# NOT valid shell to source, so parse the value out instead.
+VARS=/etc/profile.d/struct8_vars.sh
+getvar() { [ -f "$VARS" ] && awk -F= -v k="$1" '$0 ~ ("^[[:space:]]*export[[:space:]]+" k "[[:space:]]*=") {gsub(/[ "]/,"",$2); print $2; exit}' "$VARS"; }
+AUTOSTART="$(getvar AUTOSTART)";       AUTOSTART="${AUTOSTART:-on}"
+STARTUP_DELAY="$(getvar STARTUP_DELAY)"; STARTUP_DELAY="${STARTUP_DELAY:-360}"
+
+case "$(echo "$AUTOSTART" | tr '[:upper:]' '[:lower:]')" in
+  on|true|1|yes)
+    echo "Auto-start enabled: default plan will run ${STARTUP_DELAY}s after boot."
+    # The service runs the default plan once. run.sh reads DURATION/VUS/TARGET_URL
+    # /METHOD/RPS from /etc/struct8_env itself, so nothing about the plan is
+    # duplicated here -- change the plan by changing the node's env vars.
+    cat > /etc/systemd/system/struct8-k6-loadtest.service <<'SVCEOF'
+[Unit]
+Description=Struct8 k6 default load test (one-shot)
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+[Service]
+Type=oneshot
+ExecStart=/opt/k6/run.sh
+SVCEOF
+
+    # OnBootSec gives the target time to come up before the load starts. It is a
+    # one-shot timer: the plan runs once per boot, not on a schedule -- an agent
+    # or a person re-runs it on demand with /opt/k6/run.sh.
+    cat > /etc/systemd/system/struct8-k6-loadtest.timer <<TIMEREOF
+[Unit]
+Description=Fire the Struct8 k6 default load test once, after a delay
+[Timer]
+OnBootSec=${STARTUP_DELAY}
+AccuracySec=1s
+[Install]
+WantedBy=timers.target
+TIMEREOF
+
+    systemctl daemon-reload
+    systemctl enable --now struct8-k6-loadtest.timer
+    echo "Timer armed (OnBootSec=${STARTUP_DELAY}s)."
+    ;;
+  *)
+    echo "Auto-start disabled (AUTOSTART=${AUTOSTART}); generator stays idle until /opt/k6/run.sh is called."
+    ;;
+esac
+
 echo "Done. k6 image is ready; test script is at /opt/k6/scripts/load-test.js."
-echo "Fire a run through Debug Access: TARGET_URL=... /opt/k6/run.sh -- nothing runs on its own."
+echo "On demand: TARGET_URL=... /opt/k6/run.sh  |  Auto: systemd timer struct8-k6-loadtest.timer"
