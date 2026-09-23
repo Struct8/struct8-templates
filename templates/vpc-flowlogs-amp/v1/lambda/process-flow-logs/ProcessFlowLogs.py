@@ -99,12 +99,22 @@ OUTPUT_PREFIX = os.environ.get('OUTPUT_PREFIX', 'struct8/')
 # deliver, so a coarser value here only loses resolution.
 BUCKET_SECONDS = int(os.environ.get('BUCKET_SECONDS', '60'))
 
-# How long to wait before a time bucket is considered closed. Anything delivered
-# after this is dropped and counted, because Prometheus refuses a second value for an
-# instant it already holds. 30 minutes against a delivery that is documented as
-# roughly 10 -- and the tail of that delay is the measurement this parameter is
-# waiting for.
-CUTOFF_SECONDS = int(os.environ.get('CUTOFF_SECONDS', '1800'))
+# 🔴 THERE IS NO WAIT FOR A BUCKET TO CLOSE, and there used to be one.
+# `CUTOFF_SECONDS` skipped every bucket that started less than that long ago, on
+# the theory that a later object would complete the minute and it should be
+# written once. Nothing ever re-read the object, so what was skipped was simply
+# gone. Measured on 2026-09-23, with the laboratory's generators running without
+# a pause: the minute straddling each delivery kept 4.4 MB and 0.66 MB, against
+# 7.5 to 16 MB for every other minute -- one minute lost per delivery.
+#
+# Each object now writes every bucket it holds. The two shares of a split minute
+# land on different instants (`write_offset_ms`), and the query sums the bucket
+# back together. The share that arrives second is older than the newest sample of
+# its series, so it relies on the workspace accepting out-of-order samples -- as
+# every late record already did. A refusal is not silent: `write_series` counts it
+# as `series_refused` and prints which series it was.
+#
+# An environment that still sets `CUTOFF_SECONDS` changes nothing; nothing reads it.
 
 # The highest number of pairs kept per bucket. What falls outside is summed into one
 # `rest` row, so the total still closes.
@@ -689,6 +699,47 @@ def egress_path(record):
     return EGRESS_PATHS.get(path, '')
 
 
+# Where an operating system takes a port from when IT opens a connection. 32768
+# is the floor Linux uses (32768-60999); Windows and several AWS services start
+# higher, so the lowest floor catches all of them.
+EPHEMERAL_FLOOR = int(os.environ.get('EPHEMERAL_FLOOR', '32768'))
+
+
+def service_port(record):
+    """The port that names the SERVICE of a conversation, in either direction.
+
+    A request goes TO the service port and its reply comes FROM it, so a label
+    keyed by `dstport` named every reply after the client's ephemeral port. That
+    cost twice. A new series per connection: 833 of the 1108 series a
+    three-machine laboratory wrote in thirty minutes, measured on 2026-09-23. And
+    a breakdown that called the download half of an HTTPS conversation "TCP
+    ephemeral ports", which says which side picked the port and nothing about
+    what was talked.
+
+    The service is the LOWER of the two ports -- the side that did not pick its
+    port at random. When both are at or above the ephemeral floor there is nothing
+    to name (gRPC on 50051 answered from 40000 is the common case), and the value
+    is clamped to the floor itself: a label that would take a new value per
+    connection takes exactly one, and the reader names it "ephemeral ports".
+
+    WHAT IT GETS WRONG: a service above 1024 reached through a NAT gateway, which
+    picks source ports from 1024 up, is named after the NAT's port whenever that
+    one happens to be lower.
+
+    A protocol without ports writes 0 on both sides -- ICMP -- and gets 0, which
+    the reader names by the protocol. None when the record carries no port.
+    """
+    ports = []
+    for name in ('srcport', 'dstport'):
+        try:
+            ports.append(int(value_of(record, name)))
+        except (TypeError, ValueError):
+            continue
+    if not ports:
+        return None
+    return str(min(min(ports), EPHEMERAL_FLOOR))
+
+
 # --- aggregation ------------------------------------------------------------------
 
 def accumulate(records, cidrs, diagnostics, names=None):
@@ -701,6 +752,18 @@ def accumulate(records, cidrs, diagnostics, names=None):
         status = value_of(record, 'log-status')
         if status in ('NODATA', 'SKIPDATA'):
             diagnostics['records_' + str(status).lower()] += 1
+            continue
+
+        # 🔴 A REFUSED PACKET IS NOT TRAFFIC. `REJECT` is a packet a security
+        # group or a network ACL dropped: it never reached anything, and on a
+        # machine with a public address it is mostly the internet trying ports.
+        # Counted, it became forty 40-byte rows -- TCP 3389, 23, 8443, SMTP -- in
+        # the breakdown of every reply coming in from outside. Measured on
+        # 2026-09-23: 203 of 203 inbound records from outside on a port below the
+        # ephemeral floor were REJECT, against security groups that accept only
+        # the VPC's own range.
+        if value_of(record, 'action') == 'REJECT':
+            diagnostics['records_rejected'] += 1
             continue
 
         if any(value_of(record, name) is None for name in REQUIRED_FIELDS):
@@ -750,9 +813,12 @@ def accumulate(records, cidrs, diagnostics, names=None):
             # addressed TO it.
             labels['hop'] = '1'
 
-        port = value_of(record, 'dstport')
-        if port:
-            labels['dstport'] = port
+        # The SERVICE, not the destination port: both directions of one
+        # conversation carry the same value, and no connection mints a label
+        # value of its own. See `service_port`.
+        port = service_port(record)
+        if port is not None:
+            labels['service_port'] = port
 
         # 🔴 THE PROTOCOL, which the log has always carried and this never read.
         # Without it a share can only be named after a port, and `dstport=0` --
@@ -872,16 +938,15 @@ def write_offset_ms(keys):
     return int.from_bytes(digest[:4], 'big') % (BUCKET_SECONDS * 1000)
 
 
-def to_series(totals, diagnostics, offset_ms=0):
-    """One Prometheus series per (labels, metric), samples ordered by instant."""
+def to_series(totals, offset_ms=0):
+    """One Prometheus series per (labels, metric), samples ordered by instant.
+
+    Every bucket goes out, the newest one included -- see the note where
+    `CUTOFF_SECONDS` used to be for what holding one back cost.
+    """
     grouped = defaultdict(list)
-    now = int(time.time())
-    closed_before = now - CUTOFF_SECONDS
 
     for (bucket, labels), (byte_count, packet_count) in sorted(totals.items()):
-        if bucket > closed_before:
-            diagnostics['buckets_still_open'] += 1
-            continue
         timestamp_ms = bucket * 1000 + offset_ms
         grouped[(labels, METRIC_BYTES)].append((timestamp_ms, byte_count))
         grouped[(labels, METRIC_PACKETS)].append((timestamp_ms, packet_count))
@@ -1028,11 +1093,11 @@ def lambda_handler(event, context):
     diagnostics['addresses_named'] = len(names)
 
     totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, names))
-    edge_series = to_series(totals, diagnostics, offset_ms)
+    edge_series = to_series(totals, offset_ms)
 
     if not edge_series:
         print('Nothing to write. Diagnostics: ' + json.dumps(dict(diagnostics)))
-        return {'statusCode': 200, 'body': 'no closed buckets'}
+        return {'statusCode': 200, 'body': 'nothing to write'}
 
     write_series(edge_series, diagnostics)
     # The diagnostics go in a request of their own, AFTER the edges, so a refused

@@ -276,7 +276,7 @@ PROTO_LINES = [
 ]
 proto_records = [{n: line.split()[i] for n, i in field_map.items()} for line in PROTO_LINES]
 proto_totals = pfl.accumulate(proto_records, cidrs, defaultdict(int))
-proto_shares = {(dict(k[1]).get('protocol'), dict(k[1]).get('dstport')) for k in proto_totals}
+proto_shares = {(dict(k[1]).get('protocol'), dict(k[1]).get('service_port')) for k in proto_totals}
 
 check('ICMP is labelled 1, and the 0 beside it is not what should name the share',
       ('1', '0') in proto_shares, str(sorted(proto_shares)))
@@ -311,26 +311,76 @@ check('the internal ingress copy is still dropped -- that one IS a duplicate',
       len(out_totals) == 2 and out_diagnostics['records_inbound_kept'] == 1,
       str(len(out_totals)) + ' series, ' + str(dict(out_diagnostics)))
 
-check('a bucket from last year is closed and goes out',
-      len(pfl.to_series(totals, defaultdict(int))) == len(totals) * 2)
+print('\n=== a refused packet is not traffic ===')
+REFUSED_LINES = [
+    # the internet trying RDP on a public address, dropped by the security group
+    '11 vpc-1 sub-1 eni-1 i-0abc 185.220.101.4 10.0.1.5 185.220.101.4 10.0.1.5 51123 3389 6 1 40 1758549780 1758549840 REJECT OK ingress - - - -',
+    # and an outbound attempt a network ACL refused: not traffic either
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 140.82.121.4 10.0.1.5 140.82.121.4 5555 25 6 3 180 1758549780 1758549840 REJECT OK egress 8 - - -',
+    # the conversation that DID happen, which must survive untouched
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 140.82.121.4 10.0.1.5 140.82.121.4 5556 443 6 4 800 1758549780 1758549840 ACCEPT OK egress 8 - - -',
+]
+refused_records = [{n: line.split()[i] for n, i in field_map.items()} for line in REFUSED_LINES]
+refused_diagnostics = defaultdict(int)
+refused_totals = pfl.accumulate(refused_records, cidrs, refused_diagnostics)
 
-# The cutoff only proves itself against a RECENT instant: the sample lines are from
-# 2025 and have been closed for a year, so they would pass under any cutoff.
+check('both refused records are dropped, whatever their direction',
+      refused_diagnostics['records_rejected'] == 2, str(dict(refused_diagnostics)))
+check('only the accepted conversation is left, with its own bytes',
+      len(refused_totals) == 1 and list(refused_totals.values())[0][0] == 800,
+      str({dict(k[1]).get('service_port'): v for k, v in refused_totals.items()}))
+
+print('\n=== a conversation is named after the service, both ways ===')
+SERVICE_LINES = [
+    # the request: from the client's ephemeral port TO 443
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 140.82.121.4 10.0.1.5 140.82.121.4 40001 443 6 4 800 1758549780 1758549840 ACCEPT OK egress 8 - - -',
+    # its reply: FROM 443 to that port. `dstport` here is 40001, and it was what
+    # named this half -- "TCP ephemeral ports", one new series per connection.
+    '11 vpc-1 sub-1 eni-1 i-0abc 140.82.121.4 10.0.1.5 140.82.121.4 10.0.1.5 443 40001 6 9 9000 1758549780 1758549840 ACCEPT OK ingress - - - -',
+    # a second connection to the same service: a new client port, NOT a new label
+    '11 vpc-1 sub-1 eni-1 i-0abc 140.82.121.4 10.0.1.5 140.82.121.4 10.0.1.5 443 40777 6 9 9000 1758549780 1758549840 ACCEPT OK ingress - - - -',
+    # both ends ephemeral: gRPC on 50051 answered from 40002. Nothing to name.
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 50051 40002 6 5 700 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 50051 40003 6 5 700 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+]
+service_records = [{n: line.split()[i] for n, i in field_map.items()} for line in SERVICE_LINES]
+service_totals = pfl.accumulate(service_records, cidrs, defaultdict(int))
+service_by_pair = defaultdict(set)
+for (_, label_tuple), values in service_totals.items():
+    as_dict = dict(label_tuple)
+    left = as_dict.get('src_id') or as_dict.get('src_addr')
+    right = as_dict.get('dst_id') or as_dict.get('dst_addr')
+    service_by_pair[(left, right)].add(as_dict.get('service_port'))
+
+check('the request is named after the port it went to',
+      service_by_pair[('i-0abc', 'internet')] == {'443'}, str(dict(service_by_pair)))
+check('and its reply after the port it came from -- the same service',
+      service_by_pair[('internet', 'i-0abc')] == {'443'}, str(dict(service_by_pair)))
+check('two connections to one service are one series, not one per client port',
+      sum(1 for (_, label_tuple) in service_totals
+          if dict(label_tuple).get('src_id') == 'internet') == 1,
+      str(len(service_totals)) + ' series')
+check('two ephemeral ends collapse to the floor, one value for every connection',
+      service_by_pair[('i-0abc', '10.0.2.9')] == {str(pfl.EPHEMERAL_FLOOR)},
+      str(dict(service_by_pair)))
+check('no series carries `dstport` any more',
+      not any('dstport' in dict(label_tuple) for (_, label_tuple) in service_totals))
+
+check('a bucket from last year goes out',
+      len(pfl.to_series(totals)) == len(totals) * 2)
+
+# The old cutoff held back every bucket younger than it, and nothing re-read the
+# object afterwards: the newest minute of every delivery was lost. The sample lines
+# are from 2025, so only a RECENT instant proves the newest bucket goes out.
 now = int(time.time())
 recent = dict(records[0])
 recent['start'] = str(now - 60)
 recent['end'] = str(now)
-recent_diagnostics = defaultdict(int)
-recent_series = pfl.to_series(
-    pfl.accumulate([recent], cidrs, recent_diagnostics), recent_diagnostics)
-check('what just arrived is held back by the cutoff',
-      recent_series == [] and recent_diagnostics['buckets_still_open'] == 1,
-      'series=' + str(len(recent_series)))
+recent_series = pfl.to_series(pfl.accumulate([recent], cidrs, defaultdict(int)))
+check('what just arrived goes out at once, bytes and packets',
+      len(recent_series) == 2, 'series=' + str(len(recent_series)))
 
-original_cutoff = pfl.CUTOFF_SECONDS
-pfl.CUTOFF_SECONDS = -10 ** 9
-series = pfl.to_series(totals, defaultdict(int))
-pfl.CUTOFF_SECONDS = original_cutoff
+series = pfl.to_series(totals)
 check('one bytes series and one packets series per edge',
       len(series) == len(totals) * 2, str(len(series)))
 check('every series carries __name__', all('__name__' in l for l, _ in series))
@@ -490,11 +540,9 @@ check('the offset is the same in every process, not Python hash()',
 # The measured case, rebuilt: one bucket, one pair, two objects, 2778 and 1401.
 BUCKET = 1790117040
 PAIR = (('src_id', 'i-0abc'), ('dst_id', 'internet'))
-sample_a = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [2778, 29]},
-                                             defaultdict(int), offset_a)
+sample_a = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [2778, 29]}, offset_a)
             if labels['__name__'] == pfl.METRIC_BYTES][0][0]
-sample_b = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [1401, 13]},
-                                             defaultdict(int), offset_b)
+sample_b = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [1401, 13]}, offset_b)
             if labels['__name__'] == pfl.METRIC_BYTES][0][0]
 
 check('the two writes fall in the SAME minute',
@@ -505,8 +553,8 @@ check('at DIFFERENT instants, which is what Prometheus accepts',
 check('and the window sums back to what the minute really carried',
       sample_a[1] + sample_b[1] == 4179, str(sample_a[1] + sample_b[1]))
 check('with no offset the two would land on the same instant -- the 400',
-      pfl.to_series({(BUCKET, PAIR): [2778, 29]}, defaultdict(int))[0][1][0][0]
-      == pfl.to_series({(BUCKET, PAIR): [1401, 13]}, defaultdict(int))[0][1][0][0])
+      pfl.to_series({(BUCKET, PAIR): [2778, 29]})[0][1][0][0]
+      == pfl.to_series({(BUCKET, PAIR): [1401, 13]})[0][1][0][0])
 
 
 print('\n=== the ORIGINAL address, which was never being read ===')
@@ -569,12 +617,12 @@ print('\n=== the account, without which two of them share a series ===')
 
 ACCOUNT_WAS = pfl.ACCOUNT
 pfl.ACCOUNT = '952133486861'
-labels_out = pfl.to_series({(BUCKET, PAIR): [10, 1]}, defaultdict(int))[0][0]
+labels_out = pfl.to_series({(BUCKET, PAIR): [10, 1]})[0][0]
 check('every series says which account it came from',
       labels_out.get('account') == '952133486861', str(labels_out.get('account')))
 pfl.ACCOUNT = ''
 check('and an account that was never configured adds no empty label',
-      'account' not in pfl.to_series({(BUCKET, PAIR): [10, 1]}, defaultdict(int))[0][0])
+      'account' not in pfl.to_series({(BUCKET, PAIR): [10, 1]})[0][0])
 pfl.ACCOUNT = ACCOUNT_WAS
 
 

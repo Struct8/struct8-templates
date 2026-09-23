@@ -23,9 +23,10 @@ whether the read path works against an account.
 
 `v1/lambda/process-flow-logs/` — the aggregator, wired to the Lambda's
 `file_path_`. It reads plain-text flow log objects, derives the field map from
-each file's own header, keeps the egress direction only, names both ends,
-collapses everything outside the known CIDRs, accumulates into 60-second buckets
-and remote-writes the result. Remote write is protobuf framed in snappy, encoded
+each file's own header, drops what a security group or network ACL refused,
+keeps one capture of every flow, names both ends and the service port, collapses
+everything outside the known CIDRs, accumulates into 60-second buckets and
+remote-writes the result. Remote write is protobuf framed in snappy, encoded
 by hand: **no dependency outside the runtime**, so the directory zips as it is.
 
 `v1/user_data/FlowLogTrafficGenerator.sh` — an Amazon Linux 2023 `user_data`
@@ -49,7 +50,9 @@ decorate it:
 |---|---|
 | `traffic-path` | Which door the flow left the VPC through. It becomes the `egress` label, and the canvas lands the far end of the conversation on that gateway |
 | `pkt-dst-aws-service` | Whether a destination is a named AWS service. `traffic-path` value `2` is ambiguous — a gateway VPC endpoint only ever serves S3 and DynamoDB, whose flows carry this field, so a record **with** a service is undecidable and one without left through the Internet Gateway |
-| `flow-direction` | Which side of a conversation a record describes. Every flow inside a VPC is written twice, once at each end; keeping the egress side counts it once |
+| `flow-direction` | Which side of a conversation a record describes. Every flow inside a VPC is written twice, once at each end, and only the egress copy is kept; a reply from outside is captured once, on its way in, and that copy is kept |
+| `action` | Whether the packet got through. `REJECT` is a packet a security group or a network ACL dropped — on a public address, mostly the internet trying ports — and it is not counted as traffic |
+| `srcport`, `dstport` | The service a conversation is named after: the lower of the two ports, so a request and its reply carry the same `service_port`. Two client-range ports give `EPHEMERAL_FLOOR` itself |
 
 `FALLBACK_FIELD_ORDER` below is the same list, used only for an object that
 arrives with no header line.
@@ -66,7 +69,7 @@ names into the Lambda's environment, so nothing here is account-specific.
 | `ACCOUNT` | empty | Account id, written as a series label |
 | `AWS_REGION` | `us-east-1` | Set by the runtime |
 | `BUCKET_SECONDS` | `60` | Aggregation window |
-| `CUTOFF_SECONDS` | `1800` | How long a bucket stays open for late records |
+| `EPHEMERAL_FLOOR` | `32768` | Where client ports start. A conversation whose two ports are both at or above it is labelled with this value, so no connection adds a series of its own |
 | `TOP_N_PAIRS` | `200` | Cardinality ceiling; the rest folds into one row |
 | `DELIVERY_PREFIX` | `AWSLogs/` | Where the flow log writes |
 | `OUTPUT_PREFIX` | `struct8/` | Refused as input, so the Lambda cannot read its own output |
