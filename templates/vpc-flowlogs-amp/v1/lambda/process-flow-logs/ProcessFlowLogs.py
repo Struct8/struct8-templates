@@ -399,6 +399,11 @@ def _expiry():
 # of a whole batch.
 ADDRESS_CHUNK = 100
 
+# The tag AWS writes on every instance an Auto Scaling group launches. Its value is
+# the group's name in the account, which is also how the group's ARN ends -- so it
+# finds the group's box on the canvas, where the Name tag only repeats a label.
+AUTO_SCALING_GROUP_TAG = 'aws:autoscaling:groupName'
+
 
 def names_for_addresses(addresses):
     """`address -> Name tag`, asking EC2 only for what is missing or stale.
@@ -434,14 +439,17 @@ def names_for_addresses(addresses):
                 for reservation in page.get('Reservations', []):
                     for instance in reservation.get('Instances', []):
                         name = ''
+                        group = ''
                         for tag in instance.get('Tags', []):
                             if tag.get('Key') == 'Name':
                                 name = tag.get('Value', '')
+                            elif tag.get('Key') == AUTO_SCALING_GROUP_TAG:
+                                group = tag.get('Value', '')
                         for interface in instance.get('NetworkInterfaces', []):
                             for entry in interface.get('PrivateIpAddresses', []):
                                 address = entry.get('PrivateIpAddress')
                                 if address:
-                                    found[address] = name
+                                    found[address] = (name, group)
         except Exception as error:  # noqa: BLE001 -- a name is worth less than the run
             # Nothing is cached: a transport failure is not evidence that these
             # addresses have no name, and caching it as one would hide the
@@ -450,11 +458,22 @@ def names_for_addresses(addresses):
                   + ' addresses: ' + str(error))
             continue
         for address in chunk:
-            _name_by_address[address] = {'name': found.get(address, ''),
+            name, group = found.get(address, ('', ''))
+            _name_by_address[address] = {'name': name, 'group': group,
                                          'expires_at': _expiry()}
 
     return {address: entry['name']
             for address, entry in _name_by_address.items() if entry['name']}
+
+
+def groups_for_addresses():
+    """`address -> Auto Scaling group`, from what `names_for_addresses` read.
+
+    No call of its own: the describe that names an address already carries the tag
+    AWS puts on every instance a group launches. Call it after naming the batch.
+    """
+    return {address: entry['group']
+            for address, entry in _name_by_address.items() if entry.get('group')}
 
 
 def addresses_in(records, cidrs):
@@ -588,8 +607,9 @@ def capturing_side(record):
     return 'dst' if value_of(record, 'flow-direction') == 'ingress' else 'src'
 
 
-def name_endpoint(record, side, cidrs, names=None, hop=False):
-    """Returns the five labels for one end: id, address, scope, type and name.
+def name_endpoint(record, side, cidrs, names=None, hop=False, groups=None):
+    """Returns the labels for one end: id, address, scope, type and name, plus the
+    Auto Scaling group when the end is an instance one launched.
 
     Identity before address, because an address is reassigned and an id is not. Both
     are emitted when both exist: a disagreement between them is the only free signal
@@ -601,6 +621,12 @@ def name_endpoint(record, side, cidrs, names=None, hop=False):
     group raises is born carrying it. That is why `src_id` stays per-instance and
     the collapse happens on `src_name`: summing by name gives the group, summing
     by id gives the machine, and neither is thrown away.
+
+    THE GROUP IS WHAT FINDS THE GROUP'S BOX. The canvas lands an end by id or by
+    address, and a group's box holds neither of its instances: its status carries
+    the group's ARN, which ends with the group's name. `src_group` is that name,
+    read from the tag AWS puts on the instance -- a Name tag is a label, and two
+    boxes can share one. Absent, not empty, on anything a group did not launch.
 
     Read from the RECORD first. With `tag_field_specification` the flow log
     carries the tag itself, and then nothing has to be described at all -- the
@@ -638,13 +664,19 @@ def name_endpoint(record, side, cidrs, names=None, hop=False):
         # `instance-tag` only exists for the interface that captured the record;
         # the other end is named by the address map.
         from_record = value_of(record, 'instance-tag') if (side == owner and not hop) else None
-        return {
+        labels = {
             side + '_id': identifier,
             side + '_addr': address,
             side + '_scope': scope,
             side + '_type': kind,
             side + '_name': from_record or (names or {}).get(address, ''),
         }
+        # By ADDRESS, so it holds on a hop too: the address is the group's
+        # instance whichever interface wrote the record.
+        group = (groups or {}).get(address, '')
+        if group:
+            labels[side + '_group'] = group
+        return labels
 
     # Outside every known CIDR the canvas has no box to draw, so the end collapses.
     # Which of the four it collapses to is read from the record, never guessed.
@@ -760,7 +792,7 @@ def service_port(record):
 
 # --- aggregation ------------------------------------------------------------------
 
-def accumulate(records, cidrs, diagnostics, names=None):
+def accumulate(records, cidrs, diagnostics, names=None, groups=None):
     """(bucket, labels) -> [bytes, packets], keeping only the egress direction."""
     totals = defaultdict(lambda: [0, 0])
 
@@ -821,8 +853,8 @@ def accumulate(records, cidrs, diagnostics, names=None):
         bucket = (start // BUCKET_SECONDS) * BUCKET_SECONDS
 
         labels = {}
-        labels.update(name_endpoint(record, 'src', cidrs, names, hop))
-        labels.update(name_endpoint(record, 'dst', cidrs, names, hop))
+        labels.update(name_endpoint(record, 'src', cidrs, names, hop, groups))
+        labels.update(name_endpoint(record, 'dst', cidrs, names, hop, groups))
         if hop:
             # DECLARED, not left to be inferred from the shape of the other
             # labels. A hop and a direct conversation between the same two boxes
@@ -1108,9 +1140,11 @@ def lambda_handler(event, context):
     # does not already hold. In the steady state of a warm container that list is
     # empty and EC2 is not called at all.
     names = names_for_addresses(addresses_in(records, cidrs))
+    groups = groups_for_addresses()
     diagnostics['addresses_named'] = len(names)
+    diagnostics['addresses_in_a_group'] = len(groups)
 
-    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, names))
+    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, names, groups))
     edge_series = to_series(totals, offset_ms)
 
     if not edge_series:

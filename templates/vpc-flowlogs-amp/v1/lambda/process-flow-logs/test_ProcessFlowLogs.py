@@ -744,6 +744,29 @@ pfl.ec2 = _FakeEc2(INSTANCE_PAGE, calls)
 check('and it is NOT cached as nameless: a transport failure is not an answer',
       pfl.names_for_addresses({'10.3.0.31'}).get('10.3.0.31') == 'web-fleet')
 
+# Two instances an Auto Scaling group launched, and one it did not. AWS writes
+# `aws:autoscaling:groupName` on the first two; the Name tag is the box's label.
+GROUP_PAGE = [{'Reservations': [{'Instances': [
+    {'Tags': [{'Key': 'Name', 'Value': 'ASG'},
+              {'Key': 'aws:autoscaling:groupName', 'Value': 'ASG'}],
+     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.5.0.11'}]}]},
+    {'Tags': [{'Key': 'Name', 'Value': 'ASG'},
+              {'Key': 'aws:autoscaling:groupName', 'Value': 'ASG'}],
+     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.5.0.12'}]}]},
+    {'Tags': [{'Key': 'Name', 'Value': 'nat'}],
+     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.3.0.10'}]}]},
+]}]}]
+
+calls = []
+pfl._name_by_address.clear()
+pfl.ec2 = _FakeEc2(GROUP_PAGE, calls)
+pfl.names_for_addresses({'10.5.0.11', '10.5.0.12', '10.3.0.10'})
+groups = pfl.groups_for_addresses()
+check('the group comes out of the same describe that names the address',
+      len(calls) == 1 and groups == {'10.5.0.11': 'ASG', '10.5.0.12': 'ASG'}, str(groups))
+check('and an instance no group launched has no entry at all',
+      '10.3.0.10' not in groups, str(groups))
+
 pfl.ec2 = EC2_WAS
 
 spread = {pfl._expiry() for _ in range(50)}
@@ -814,6 +837,45 @@ quiet_labels = dict(list(pfl.accumulate([egress_record('-')], LAB_CIDRS,
                                         defaultdict(int)).keys())[0][1])
 check('and it is ABSENT, not empty, when the record cannot say',
       'egress' not in quiet_labels, str(quiet_labels))
+
+
+print('\n=== the Auto Scaling group an end belongs to ===')
+
+# An instance of the group pings the NAT instance of the other VPC across a
+# peering, and the NAT answers. Each direction is the egress record of its sender.
+PEERED_CIDRS = [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab'),
+                (ipaddress.ip_network('10.5.0.0/16'), 'vpc-asg')]
+PEER_GROUPS = {'10.5.0.11': 'ASG'}
+
+
+def ping_record(src, dst, instance):
+    return {'srcaddr': src, 'dstaddr': dst, 'flow-direction': 'egress',
+            'traffic-path': '4', 'srcport': '0', 'dstport': '0', 'protocol': '1',
+            'packets': '10', 'bytes': '12280', 'start': '1790205000',
+            'instance-id': instance}
+
+
+peer_totals = pfl.accumulate([ping_record('10.5.0.11', '10.3.0.10', 'i-asg1'),
+                              ping_record('10.3.0.10', '10.5.0.11', 'i-nat')],
+                             PEERED_CIDRS, defaultdict(int), groups=PEER_GROUPS)
+by_source = {dict(labels)['src_addr']: dict(labels) for (_, labels) in peer_totals}
+out_of_group = by_source.get('10.5.0.11', {})
+into_group = by_source.get('10.3.0.10', {})
+check('the sender launched by a group carries the group',
+      out_of_group.get('src_group') == 'ASG', str(out_of_group))
+check('and so does the far end of the reply, named by address alone',
+      into_group.get('dst_group') == 'ASG', str(into_group))
+check('the end no group launched has no group label, not an empty one',
+      'dst_group' not in out_of_group and 'src_group' not in into_group,
+      str((out_of_group, into_group)))
+check('the per-instance id is still there beside it',
+      out_of_group.get('src_id') == 'i-asg1', str(out_of_group))
+
+without = pfl.accumulate([ping_record('10.5.0.11', '10.3.0.10', 'i-asg1')],
+                         PEERED_CIDRS, defaultdict(int))
+check('with no groups known, the series looks exactly as before',
+      not any(key.endswith('_group') for key in dict(list(without.keys())[0][1])),
+      str(dict(list(without.keys())[0][1])))
 
 
 print('\n' + ('all checks passed' if not failures else 'FAILED: ' + ', '.join(failures)))
