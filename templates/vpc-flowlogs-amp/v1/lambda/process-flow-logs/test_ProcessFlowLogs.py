@@ -284,6 +284,33 @@ check('TCP on 443 stays a share of its own, not folded into the ICMP one',
       ('6', '443') in proto_shares and len(proto_totals) == 2,
       str(len(proto_totals)) + ' ' + str(sorted(proto_shares)))
 
+print('\n=== the reply from outside is the only capture there is ===')
+OUTSIDE_LINES = [
+    # out to the internet, on the instance's own interface
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 140.82.121.4 10.0.1.5 140.82.121.4 5555 443 6 4 800 1758549780 1758549840 ACCEPT OK egress 8 - - -',
+    # the reply coming back: same interface, INGRESS, and no traffic-path at all
+    '11 vpc-1 sub-1 eni-1 i-0abc 140.82.121.4 10.0.1.5 140.82.121.4 10.0.1.5 443 5555 6 9 9000 1758549780 1758549840 ACCEPT OK ingress - - - -',
+    # an internal flow seen at the RECEIVER: that one does have a second capture
+    '11 vpc-1 sub-2 eni-2 i-0def 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 4444 443 6 10 1500 1758549780 1758549840 ACCEPT OK ingress 1 - - -',
+]
+out_records = [{n: line.split()[i] for n, i in field_map.items()} for line in OUTSIDE_LINES]
+out_diagnostics = defaultdict(int)
+out_totals = pfl.accumulate(out_records, cidrs, out_diagnostics)
+out_pairs = {
+    (dict(k[1]).get('src_id') or dict(k[1]).get('src_addr'),
+     dict(k[1]).get('dst_id') or dict(k[1]).get('dst_addr'))
+    for k in out_totals
+}
+
+check('the outbound half is there', ('i-0abc', 'internet') in out_pairs, str(sorted(out_pairs)))
+# The whole point: named by the SAME id as the outbound half. By address the two
+# would be different pairs and the conversation would be drawn as two things.
+check('and the reply, named by the id of the interface that captured IT',
+      ('internet', 'i-0abc') in out_pairs, str(sorted(out_pairs)))
+check('the internal ingress copy is still dropped -- that one IS a duplicate',
+      len(out_totals) == 2 and out_diagnostics['records_inbound_kept'] == 1,
+      str(len(out_totals)) + ' series, ' + str(dict(out_diagnostics)))
+
 check('a bucket from last year is closed and goes out',
       len(pfl.to_series(totals, defaultdict(int))) == len(totals) * 2)
 

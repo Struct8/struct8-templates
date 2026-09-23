@@ -526,6 +526,40 @@ def describes_a_hop(record):
     return False
 
 
+def arrived_from_outside(record, cidrs):
+    """An ingress record whose far end owns no interface here.
+
+    The deduplication in `accumulate` keeps the egress side because a VPC flow
+    log writes an internal flow TWICE -- egress at the sender, ingress at the
+    receiver. A conversation with the OUTSIDE has no second copy: the far end has
+    no interface in this VPC, so the reply from the internet exists only as this
+    ingress record. Measured on 2026-09-23: every reply to a public instance
+    appeared on that instance's own interface and on no other.
+
+    So for those, dropping the ingress record is not deduplication. It is half of
+    every external conversation, and it is why a resource talking to the internet
+    was drawn with one arrow while two resources talking to each other got two.
+    """
+    far = value_of(record, 'pkt-srcaddr') or value_of(record, 'srcaddr') or ''
+    return not scope_of_address(far, cidrs)
+
+
+def capturing_side(record):
+    """Which end of the record the interface that WROTE it sits on.
+
+    🔴 `instance-id`, `interface-type` and `instance-tag` describe the capturing
+    interface, never the far end. On an egress record that interface is the
+    source; on an ingress one it is the destination. Assuming `src` was harmless
+    while only egress records were kept -- and wrong the moment the inbound half
+    started being kept, because the reply would arrive as
+    `internet -> 10.3.0.188`, an ADDRESS, while the outbound half is
+    `i-0bb2… -> internet`, an ID. Two spellings of one pair never meet, and the
+    conversation would be drawn as two separate things instead of two directions
+    of one.
+    """
+    return 'dst' if value_of(record, 'flow-direction') == 'ingress' else 'src'
+
+
 def name_endpoint(record, side, cidrs, names=None, hop=False):
     """Returns the five labels for one end: id, address, scope, type and name.
 
@@ -562,7 +596,8 @@ def name_endpoint(record, side, cidrs, names=None, hop=False):
         # forwarder: the wrong box, carrying a number that looks right. Both ends
         # of a hop are named by ADDRESS alone, which is all the record asserts
         # about them, and the canvas already lands an address on its node.
-        if side == 'src' and not hop:
+        owner = capturing_side(record)
+        if side == owner and not hop:
             identifier = value_of(record, 'instance-id') or ''
             if identifier:
                 kind = 'instance'
@@ -570,11 +605,11 @@ def name_endpoint(record, side, cidrs, names=None, hop=False):
             if service_name:
                 identifier, kind = service_name, 'ecs_service'
         interface_type = value_of(record, 'interface-type')
-        if interface_type and side == 'src' and not hop:
+        if interface_type and side == owner and not hop:
             kind = interface_type
-        # `instance-tag` only exists for the interface that captured the record,
-        # which is the source side; the destination is named by the address map.
-        from_record = value_of(record, 'instance-tag') if (side == 'src' and not hop) else None
+        # `instance-tag` only exists for the interface that captured the record;
+        # the other end is named by the address map.
+        from_record = value_of(record, 'instance-tag') if (side == owner and not hop) else None
         return {
             side + '_id': identifier,
             side + '_addr': address,
@@ -687,10 +722,12 @@ def accumulate(records, cidrs, diagnostics, names=None):
         direction = value_of(record, 'flow-direction')
         if direction is None:
             diagnostics['records_without_direction'] += 1
-        elif direction != 'egress' and not hop:
+        elif direction != 'egress' and not (hop or arrived_from_outside(record, cidrs)):
             continue
         if hop:
             diagnostics['records_hop'] += 1
+        elif direction == 'ingress':
+            diagnostics['records_inbound_kept'] += 1
 
         try:
             start = int(value_of(record, 'start'))
