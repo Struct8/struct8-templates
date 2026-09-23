@@ -109,10 +109,28 @@ BUCKET_SECONDS = int(os.environ.get('BUCKET_SECONDS', '60'))
 #
 # Each object now writes every bucket it holds. The two shares of a split minute
 # land on different instants (`write_offset_ms`), and the query sums the bucket
-# back together. The share that arrives second is older than the newest sample of
-# its series, so it relies on the workspace accepting out-of-order samples -- as
-# every late record already did. A refusal is not silent: `write_series` counts it
-# as `series_refused` and prints which series it was.
+# back together. The share that arrives second is usually older than the newest
+# sample of its series, so it relies on the workspace accepting out-of-order
+# samples -- as every late record already did.
+#
+# HOW LATE IT MAY ARRIVE, measured on 2026-09-23 against the laboratory's
+# workspace. A sample older than the newest of ITS OWN series goes in while it is
+# at most 10 minutes older than the newest sample the workspace holds from ANY
+# series: 10.0 minutes in, 10.1 refused with `too old sample`, and the refusal
+# names that newest sample `tsdbHeadMaxTimestamp`. It is not the series' own: a
+# sample 5 minutes older than its series' newest was refused, because it was 25
+# minutes older than what other series had written. Every invocation moves that
+# point to about now -- the diagnostic series carry the wall clock -- so a late
+# share has about ten minutes from the start of its minute. Over the laboratory's
+# first 17 objects, the oldest record of each arrived 4.4 to 6.4 minutes after its
+# minute began.
+#
+# A sample NOT older than its own series' newest is held to no such window: one
+# 11 minutes old went into a new series. At 59 minutes a different check refused
+# it (`timestamp too old`).
+#
+# A refusal is not silent: `write_series` counts it as `series_refused` and prints
+# which series it was.
 #
 # An environment that still sets `CUTOFF_SECONDS` changes nothing; nothing reads it.
 

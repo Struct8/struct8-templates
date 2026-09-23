@@ -40,6 +40,21 @@ the internet without a NAT gateway. It is a **copy** of the one under
 `ec2-nat-private`, not a reference to it: rule 4 of the repository README, because
 a shared path becomes a dependency of published versions that cannot be pinned.
 
+## How late a record may arrive
+
+AWS splits some capture minutes across two deliveries, and the second part
+reaches the workspace older than what its series already holds. The workspace
+accepts such a sample only while it is at most **10 minutes older than the newest
+sample the workspace holds from any series** (measured on 2026-09-23: 10.0 minutes
+in, 10.1 refused with `too old sample`). Every run of the Lambda moves that newest
+sample to about the current time, so a late part has about ten minutes from the
+start of its minute. In the laboratory, the oldest record of each object arrived
+4.4 to 6.4 minutes after its minute began.
+
+A refused sample is lost, and it shows: the Lambda's log prints
+`struct8_series_refused` with the series, and the count goes out as
+`struct8_flowlog_series_refused_total`.
+
 ## The flow log format is part of the contract
 
 The aggregator needs fields the **default** flow log format does not carry. The
