@@ -219,6 +219,71 @@ check('a named service becomes S3',
 check('10.99 through a VGW becomes on-premises, NOT internet',
       destinations.get('on-premises', ('', 0))[0] == 'on_premises')
 
+print('\n=== a hop through a middlebox ===')
+# One conversation, as a NAT instance and the sender each write it. Copied from
+# an account on 2026-09-23: `addr` is the hop that interface saw, `pkt` is the
+# conversation. Note the shape that makes this hard -- the record naming the next
+# hop is an INGRESS one, which the deduplication rule drops, and the sender's own
+# record (third) says `traffic-path=1` without naming anything.
+HOP_LINES = [
+    # outbound, on the NAT's interface: the only record naming the next hop
+    '11 vpc-1 sub-1 eni-nat i-0nat 10.0.1.5 10.0.0.9 10.0.1.5 140.82.121.4 5555 443 6 4 800 1758549780 1758549840 ACCEPT OK ingress - - - -',
+    # the return, same interface: egress, and today it reads as "the internet"
+    '11 vpc-1 sub-1 eni-nat i-0nat 10.0.0.9 10.0.1.5 140.82.121.4 10.0.1.5 443 5555 6 9 9000 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+    # the sender's own interface: both pairs equal, so this is the conversation
+    '11 vpc-1 sub-2 eni-1 i-0abc 10.0.1.5 140.82.121.4 10.0.1.5 140.82.121.4 5555 443 6 4 800 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+]
+hop_records = [{n: line.split()[i] for n, i in field_map.items()} for line in HOP_LINES]
+hop_diagnostics = defaultdict(int)
+hop_totals = pfl.accumulate(hop_records, cidrs, hop_diagnostics)
+
+by_pair = {}
+for (_, label_tuple), values in hop_totals.items():
+    as_dict = dict(label_tuple)
+    left = as_dict.get('src_id') or as_dict.get('src_addr')
+    right = as_dict.get('dst_id') or as_dict.get('dst_addr')
+    by_pair[(left, right, as_dict.get('hop', ''))] = (as_dict, values[0])
+
+check('the outbound hop survives, although its record is an ingress one',
+      ('10.0.1.5', '10.0.0.9', '1') in by_pair, str(sorted(by_pair)))
+check('the return hop is the middlebox talking to the machine, not the internet',
+      ('10.0.0.9', '10.0.1.5', '1') in by_pair, str(sorted(by_pair)))
+check("the sender's own record still reports the CONVERSATION",
+      ('i-0abc', 'internet', '') in by_pair, str(sorted(by_pair)))
+# The expensive mistake this forbids: `instance-id` on those two records is the
+# NAT, while the source of the outbound hop is the machine that sent TO it.
+check('neither end of a hop is named by the capturing interface',
+      all(fields.get('src_id', '') == '' and fields.get('dst_id', '') == ''
+          for (_, _, marked), (fields, _) in by_pair.items() if marked == '1'),
+      str([f for (_, _, m), (f, _) in by_pair.items() if m == '1']))
+check('a hop carries no egress door',
+      all('egress' not in fields
+          for (_, _, marked), (fields, _) in by_pair.items() if marked == '1'))
+check('three series: two hops and one conversation, nothing counted twice',
+      len(hop_totals) == 3 and hop_diagnostics['records_hop'] == 2,
+      str(len(hop_totals)) + ' series, ' + str(dict(hop_diagnostics)))
+check('the hop carries the volume that crossed it',
+      by_pair[('10.0.0.9', '10.0.1.5', '1')][1] == 9000,
+      str(by_pair.get(('10.0.0.9', '10.0.1.5', '1'))))
+
+print('\n=== the IP protocol reaches the labels ===')
+PROTO_LINES = [
+    # ICMP between two machines. A flow log writes 0 for BOTH ports, because
+    # ICMP has none -- which is how a ping came to be reported as "port 0".
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 0 0 1 10 1500 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+    # the same pair over TCP: a share of its own, whatever the ports look like
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 4444 443 6 10 800 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+]
+proto_records = [{n: line.split()[i] for n, i in field_map.items()} for line in PROTO_LINES]
+proto_totals = pfl.accumulate(proto_records, cidrs, defaultdict(int))
+proto_shares = {(dict(k[1]).get('protocol'), dict(k[1]).get('dstport')) for k in proto_totals}
+
+check('ICMP is labelled 1, and the 0 beside it is not what should name the share',
+      ('1', '0') in proto_shares, str(sorted(proto_shares)))
+check('TCP on 443 stays a share of its own, not folded into the ICMP one',
+      ('6', '443') in proto_shares and len(proto_totals) == 2,
+      str(len(proto_totals)) + ' ' + str(sorted(proto_shares)))
+
 check('a bucket from last year is closed and goes out',
       len(pfl.to_series(totals, defaultdict(int))) == len(totals) * 2)
 

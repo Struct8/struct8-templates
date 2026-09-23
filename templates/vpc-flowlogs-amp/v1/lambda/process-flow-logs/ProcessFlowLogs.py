@@ -496,7 +496,37 @@ def is_private(address):
     return parsed.is_private or parsed in ipaddress.ip_network('100.64.0.0/10')
 
 
-def name_endpoint(record, side, cidrs, names=None):
+def describes_a_hop(record):
+    """The record is about a HOP THROUGH A MIDDLEBOX, not about the conversation.
+
+    A flow that crosses a NAT instance, a NAT gateway or any other middlebox is
+    written by THAT interface with two pairs of addresses: `srcaddr`/`dstaddr`
+    are the hop it saw, and `pkt-srcaddr`/`pkt-dstaddr` are the ends the packet
+    itself carries. Equal pairs mean no middlebox was involved.
+
+    🔴 THIS IS THE ONLY PLACE THE NEXT HOP IS NAMED. The sender's own interface
+    writes the final destination in BOTH pairs, with `traffic-path=1` -- "left
+    through the VPC", which does not say through what. Measured on 2026-09-23,
+    a private instance reaching the internet through a NAT instance:
+
+        sender's interface  addr 10.3.1.223 -> 98.87.175.214   pkt the same
+        NAT's interface     addr 10.3.1.223 -> 10.3.0.153
+                            pkt  10.3.1.223 -> 98.87.175.214
+
+    Reading `pkt-` first answers WHO WAS TALKED TO, which is the right answer for
+    an edge between two workloads and the wrong one for a diagram that also draws
+    the machine doing the forwarding -- and it is what made a private instance
+    look like it talked to nobody at all.
+    """
+    for side in ('src', 'dst'):
+        seen = value_of(record, side + 'addr')
+        carried = value_of(record, 'pkt-' + side + 'addr')
+        if seen and carried and seen != carried:
+            return True
+    return False
+
+
+def name_endpoint(record, side, cidrs, names=None, hop=False):
     """Returns the five labels for one end: id, address, scope, type and name.
 
     Identity before address, because an address is reassigned and an id is not. Both
@@ -514,13 +544,25 @@ def name_endpoint(record, side, cidrs, names=None):
     carries the tag itself, and then nothing has to be described at all -- the
     describe below is the fallback, not the design.
     """
-    address = value_of(record, 'pkt-' + side + 'addr') or value_of(record, side + 'addr') or ''
+    if hop:
+        # THE HOP'S OWN ADDRESSES, and only those: on a hop record the two ends
+        # are the two interfaces that handed the packet over.
+        address = value_of(record, side + 'addr') or ''
+    else:
+        address = value_of(record, 'pkt-' + side + 'addr') or value_of(record, side + 'addr') or ''
     scope = scope_of_address(address, cidrs)
 
     if scope:
         identifier = ''
         kind = 'address'
-        if side == 'src':
+        # 🔴 ON A HOP RECORD, `instance-id`, `interface-type` and `instance-tag`
+        # all describe THE INTERFACE THAT CAPTURED IT -- the middlebox -- while
+        # the source of an outbound hop is the machine that sent TO it. Naming
+        # the source with them would move a sender's whole traffic onto the
+        # forwarder: the wrong box, carrying a number that looks right. Both ends
+        # of a hop are named by ADDRESS alone, which is all the record asserts
+        # about them, and the canvas already lands an address on its node.
+        if side == 'src' and not hop:
             identifier = value_of(record, 'instance-id') or ''
             if identifier:
                 kind = 'instance'
@@ -528,11 +570,11 @@ def name_endpoint(record, side, cidrs, names=None):
             if service_name:
                 identifier, kind = service_name, 'ecs_service'
         interface_type = value_of(record, 'interface-type')
-        if interface_type and side == 'src':
+        if interface_type and side == 'src' and not hop:
             kind = interface_type
         # `instance-tag` only exists for the interface that captured the record,
         # which is the source side; the destination is named by the address map.
-        from_record = value_of(record, 'instance-tag') if side == 'src' else None
+        from_record = value_of(record, 'instance-tag') if (side == 'src' and not hop) else None
         return {
             side + '_id': identifier,
             side + '_addr': address,
@@ -634,11 +676,21 @@ def accumulate(records, cidrs, diagnostics, names=None):
         # is written twice -- egress at the sender, ingress at the receiver. Keeping
         # the egress side counts it once. What must NOT be done instead is dividing
         # by two: that assumes both sides were captured, and it is wrong at the edge.
+        #
+        # A HOP RECORD IS KEPT WHATEVER ITS DIRECTION, and it has to be: the only
+        # record naming the next hop of an OUTBOUND flow is the ingress one on
+        # the middlebox's interface. It is not a second copy of anything -- the
+        # sender's own record says where the packet was going, this one says whom
+        # it was handed to, and they land on different pairs of ends. The rule
+        # above still holds for every record that describes a conversation.
+        hop = describes_a_hop(record)
         direction = value_of(record, 'flow-direction')
         if direction is None:
             diagnostics['records_without_direction'] += 1
-        elif direction != 'egress':
+        elif direction != 'egress' and not hop:
             continue
+        if hop:
+            diagnostics['records_hop'] += 1
 
         try:
             start = int(value_of(record, 'start'))
@@ -651,17 +703,40 @@ def accumulate(records, cidrs, diagnostics, names=None):
         bucket = (start // BUCKET_SECONDS) * BUCKET_SECONDS
 
         labels = {}
-        labels.update(name_endpoint(record, 'src', cidrs, names))
-        labels.update(name_endpoint(record, 'dst', cidrs, names))
+        labels.update(name_endpoint(record, 'src', cidrs, names, hop))
+        labels.update(name_endpoint(record, 'dst', cidrs, names, hop))
+        if hop:
+            # DECLARED, not left to be inferred from the shape of the other
+            # labels. A hop and a direct conversation between the same two boxes
+            # are different facts, and without this they would share one series
+            # and one number -- traffic passing THROUGH a NAT added to traffic
+            # addressed TO it.
+            labels['hop'] = '1'
 
         port = value_of(record, 'dstport')
         if port:
             labels['dstport'] = port
 
+        # 🔴 THE PROTOCOL, which the log has always carried and this never read.
+        # Without it a share can only be named after a port, and `dstport=0` --
+        # what a flow log writes for a protocol that HAS no ports -- was reported
+        # as "port 0": the largest slice of an edge, named after something that
+        # never existed. Measured at 98% of one edge on 2026-09-23, where it was
+        # ping. It also decides what a known port means, because 443 over UDP is
+        # not HTTPS.
+        protocol = value_of(record, 'protocol')
+        if protocol:
+            labels['protocol'] = protocol
+
         # Absent rather than empty when the record cannot say: an empty label is
         # a series of its own in Prometheus, so writing one would split a pair
         # into two series that differ by nothing anybody asked about.
-        egress = egress_path(record)
+        # NO DOOR ON A HOP. `egress` says which way a flow LEFT the VPC, and a
+        # hop names a box inside it -- the far end is already drawn, so there is
+        # nothing to substitute. It would also split the two directions of one
+        # hop by a label that describes neither: the outbound record carries no
+        # `traffic-path` at all and the return one carries `1`.
+        egress = '' if hop else egress_path(record)
         if egress:
             labels['egress'] = egress
 
