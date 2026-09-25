@@ -332,6 +332,47 @@ check('only the accepted conversation is left, with its own bytes',
       len(refused_totals) == 1 and list(refused_totals.values())[0][0] == 800,
       str({dict(k[1]).get('service_port'): v for k, v in refused_totals.items()}))
 
+print('\n=== what was refused is counted apart ===')
+REFUSED_APART_LINES = REFUSED_LINES + [
+    # the internet on a high port nobody runs a service on: counted, port dropped
+    '11 vpc-1 sub-1 eni-1 i-0abc 185.220.101.4 10.0.1.5 185.220.101.4 10.0.1.5 51124 4711 6 2 80 1758549780 1758549840 REJECT OK ingress - - - -',
+    # web -> db on MySQL, refused at db. The sender's copy says ACCEPT.
+    '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 40100 3306 6 3 180 1758549780 1758549840 ACCEPT OK egress 1 - - -',
+    '11 vpc-1 sub-2 eni-2 i-0def 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 40100 3306 6 3 180 1758549780 1758549840 REJECT OK ingress - - - -',
+    # a NAT instance refusing web: named by the hop, web -> nat
+    '11 vpc-1 sub-1 eni-nat i-0nat 10.0.1.5 10.0.0.9 10.0.1.5 140.82.121.4 40200 80 6 2 120 1758549780 1758549840 REJECT OK ingress - - - -',
+]
+apart_records = [{n: line.split()[i] for n, i in field_map.items()} for line in REFUSED_APART_LINES]
+apart_diagnostics = defaultdict(int)
+apart = pfl.accumulate_refused(apart_records, cidrs, apart_diagnostics, OWNERS)
+apart_rows = {(dict(k[1])['src_name'], dict(k[1])['dst_name'], dict(k[1]).get('service_port')): v
+              for k, v in apart.items()}
+
+check('every REJECT is counted once, and no ACCEPT is',
+      sum(v[1] for v in apart.values()) == 1 + 3 + 2 + 3 + 2, str(apart_rows))
+check('the refusal inside the VPC keeps its port, between the two boxes',
+      apart_rows.get(('web', 'db', '3306')) == [180, 3], str(apart_rows))
+check('the internet on a well-known port keeps it',
+      ('internet', 'web', '3389') in apart_rows, str(apart_rows))
+check('the internet on an arbitrary high port is counted without one',
+      apart_rows.get(('internet', 'web', None)) == [80, 2]
+      and apart_diagnostics['refused_ports_folded'] == 1, str(apart_rows))
+check('a refusal on a middlebox is named by the hop',
+      ('web', 'nat', '80') in apart_rows
+      and any(dict(k[1]).get('hop') == '1' for k in apart), str(apart_rows))
+check('no refused series carries a door',
+      not any('egress' in dict(k[1]) for k in apart), str(list(apart)))
+
+refused_out = pfl.to_series(apart, 0, pfl.REFUSED_METRICS)
+check('the refusals go out as packets, under their own metric only',
+      {s[0]['__name__'] for s in refused_out} == {'struct8_edge_rejected_packets'}
+      and sum(v for s in refused_out for _, v in s[1]) == 11,
+      str({s[0]['__name__'] for s in refused_out}))
+traffic_out = pfl.to_series(refused_totals, 0)
+check('the traffic series are unchanged: bytes and packets',
+      sorted(s[0]['__name__'] for s in traffic_out) == ['struct8_edge_bytes', 'struct8_edge_packets'],
+      str([s[0]['__name__'] for s in traffic_out]))
+
 print('\n=== a conversation is named after the service, both ways ===')
 SERVICE_LINES = [
     # the request: from the client's ephemeral port TO 443

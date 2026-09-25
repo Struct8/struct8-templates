@@ -56,6 +56,10 @@ instance admits exactly those four, one rule per protocol, and each rule names
 the group's security group as its source instead of an address range. The
 Traffic layer shows ICMP, SSH, HTTP and DNS between the two VPCs.
 
+The group also probes the private instance on 3306/tcp, which no rule admits. That
+conversation is there to be refused: the Traffic layer draws it as a refused line
+beside the four that got through.
+
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under
 `ec2-nat-private`, not a reference to it: rule 4 of the repository README, because
@@ -92,6 +96,26 @@ A missing permission does not stop the run. A load balancer or a function then
 falls back to its own name, which the generator took from the box. Any other
 owner is written as `unnamed`, and the Lambda's log says which call failed.
 
+## What was refused
+
+A packet a security group or a network ACL refused is counted in packets, as
+`struct8_edge_rejected_packets`, with the same end labels, `service_port` and
+`protocol` as the traffic series. It carries no `egress`. The traffic series never
+include it.
+
+- **Between two resources of known VPCs**, the refusal keeps its port. It is
+  usually a rule that is missing, and the port says which.
+- **With one end outside every VPC**, the port is kept only below 1024 and for a
+  few services scanners look for (3389, 3306, 5432, 8080...). Any other port is
+  counted under the protocol alone, so a public address scanned on hundreds of
+  ports writes a handful of series, not hundreds.
+
+A refused conversation also leaves an `ACCEPT` record at the sender, whose own
+rules let the packets out. That copy is counted as traffic, and when the two ends
+are in different VPCs it arrives in another object than the refusal. The canvas
+therefore treats a pair, protocol and port that carries a refusal as refused, and
+leaves its bytes out of the pair's volume.
+
 ## How late a record may arrive
 
 AWS splits some capture minutes across two deliveries, and the second part
@@ -118,7 +142,7 @@ decorate it:
 | `traffic-path` | Which door the flow left the VPC through. It becomes the `egress` label, and the canvas lands the far end of the conversation on that gateway |
 | `pkt-dst-aws-service` | Whether a destination is a named AWS service. `traffic-path` value `2` is ambiguous — a gateway VPC endpoint only ever serves S3 and DynamoDB, whose flows carry this field, so a record **with** a service is undecidable and one without left through the Internet Gateway |
 | `flow-direction` | Which side of a conversation a record describes. Every flow inside a VPC is written twice, once at each end, and only the egress copy is kept; a reply from outside is captured once, on its way in, and that copy is kept |
-| `action` | Whether the packet got through. `REJECT` is a packet a security group or a network ACL dropped — on a public address, mostly the internet trying ports — and it is not counted as traffic |
+| `action` | Whether the packet got through. `REJECT` is a packet a security group or a network ACL dropped — on a public address, mostly the internet trying ports. It is never counted as traffic; it goes out as `struct8_edge_rejected_packets` (see below) |
 | `srcport`, `dstport` | The service a conversation is named after: the lower of the two ports, so a request and its reply carry the same `service_port`. Two client-range ports give `EPHEMERAL_FLOOR` itself |
 
 `FALLBACK_FIELD_ORDER` below is the same list, used only for an object that

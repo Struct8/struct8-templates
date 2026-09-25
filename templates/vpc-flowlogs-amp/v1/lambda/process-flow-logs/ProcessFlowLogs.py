@@ -9,7 +9,8 @@ either an S3 event or an explicit key.
 WHAT THIS SLICE DOES, AND WHAT IT LEAVES OUT. It reads plain-text flow log objects,
 derives the field map from each file's own header, keeps only the egress direction,
 names both ends, collapses everything outside the known CIDRs, accumulates into
-60-second buckets and writes the result once. It does NOT yet write partials, run a
+60-second buckets and writes the result once. What a security group or a network
+ACL refused goes out as a separate packet count, never added to the traffic. It does NOT yet write partials, run a
 compactor, or read Parquet -- those come after the first run proves the path.
 
 NO NEW DEPENDENCIES. Remote write is protobuf framed in snappy, and neither needs a
@@ -147,6 +148,10 @@ FALLBACK_FIELD_ORDER = os.environ.get('FALLBACK_FIELD_ORDER', '').split()
 
 METRIC_BYTES = 'struct8_edge_bytes'
 METRIC_PACKETS = 'struct8_edge_packets'
+# What a security group or a network ACL refused, in packets. A series of its
+# own, never added to the two above: a refused packet reached nothing. See
+# `accumulate_refused`.
+METRIC_REJECTED_PACKETS = 'struct8_edge_rejected_packets'
 
 s3 = boto3.client('s3')
 ec2 = boto3.client('ec2')
@@ -979,7 +984,7 @@ def accumulate(records, cidrs, diagnostics, owners=None):
         # the breakdown of every reply coming in from outside. Measured on
         # 2026-09-23: 203 of 203 inbound records from outside on a port below the
         # ephemeral floor were REJECT, against security groups that accept only
-        # the VPC's own range.
+        # the VPC's own range. `accumulate_refused` counts them, apart.
         if value_of(record, 'action') == 'REJECT':
             diagnostics['records_rejected'] += 1
             continue
@@ -1060,6 +1065,90 @@ def accumulate(records, cidrs, diagnostics, owners=None):
         egress = '' if hop else egress_path(record)
         if egress:
             labels['egress'] = egress
+
+        key = (bucket, tuple(sorted(labels.items())))
+        totals[key][0] += byte_count
+        totals[key][1] += packet_count
+
+    return totals
+
+
+# The ports a refusal keeps as a label when one end is OUTSIDE every known VPC.
+#
+# The internet tries ports on every public address, and each port kept as a
+# label value is a series of its own: a public instance scanned on five hundred
+# ports a minute would write five hundred. Below 1024, and the few services
+# above it that scanners look for, is a bounded set that still says what was
+# tried. Any other port drops the label, and the refusal is counted under its
+# protocol alone.
+#
+# A refusal between two ends INSIDE known VPCs keeps its port whatever it is:
+# there the port is the finding -- the rule that is missing.
+REFUSED_PORTS_ABOVE_1024 = frozenset({
+    1433, 1521, 2049, 2375, 3306, 3389, 5432, 5900, 6379, 8080, 8443, 9200, 27017,
+})
+
+
+def accumulate_refused(records, cidrs, diagnostics, owners=None):
+    """(bucket, labels) -> [bytes, packets] of what a security group or a network
+    ACL refused.
+
+    A REFUSAL IS WRITTEN ONCE, so nothing here deduplicates. A packet refused on
+    its way in is `REJECT` at the receiver, while the sender's own record of it
+    says `ACCEPT` -- the sender's rules let it out. One refused on its way out is
+    `REJECT` at the sender and never reaches the receiver. Either way exactly one
+    record carries the refusal, whatever its direction.
+
+    🔴 THE SENDER'S `ACCEPT` COPY IS STILL COUNTED AS TRAFFIC by `accumulate`,
+    which keeps the egress side of every internal flow. When the two ends are in
+    different VPCs the two copies arrive in different objects, so no single run
+    sees both and can take one away. The reader does it instead: a pair, protocol
+    and port that carries a refusal is shown as refused, and its bytes are left
+    out of the pair's volume.
+
+    A refusal on a middlebox is named by the hop, like its accepted twin: a NAT
+    instance refusing a private instance is `private -> nat`, the box that said
+    no. The sender's record of the same packets names the final destination, so
+    that half stays a separate pair.
+    """
+    totals = defaultdict(lambda: [0, 0])
+
+    for record in records:
+        if value_of(record, 'action') != 'REJECT':
+            continue
+        if value_of(record, 'log-status') in ('NODATA', 'SKIPDATA'):
+            continue
+        if any(value_of(record, name) is None for name in REQUIRED_FIELDS):
+            continue
+        try:
+            start = int(value_of(record, 'start'))
+            byte_count = int(value_of(record, 'bytes'))
+            packet_count = int(value_of(record, 'packets') or 0)
+        except (TypeError, ValueError):
+            continue
+
+        bucket = (start // BUCKET_SECONDS) * BUCKET_SECONDS
+        hop = describes_a_hop(record)
+
+        labels = {}
+        labels.update(name_endpoint(record, 'src', cidrs, owners, hop))
+        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop))
+        if hop:
+            labels['hop'] = '1'
+
+        port = service_port(record)
+        outside = 'external' in (labels['src_vpc'], labels['dst_vpc'])
+        if port is not None and outside:
+            number = int(port)
+            if number >= 1024 and number not in REFUSED_PORTS_ABOVE_1024:
+                port = None
+                diagnostics['refused_ports_folded'] += 1
+        if port is not None:
+            labels['service_port'] = port
+
+        protocol = value_of(record, 'protocol')
+        if protocol:
+            labels['protocol'] = protocol
 
         key = (bucket, tuple(sorted(labels.items())))
         totals[key][0] += byte_count
@@ -1154,18 +1243,25 @@ def write_offset_ms(keys):
     return int.from_bytes(digest[:4], 'big') % (BUCKET_SECONDS * 1000)
 
 
-def to_series(totals, offset_ms=0):
+TRAFFIC_METRICS = ((METRIC_BYTES, 0), (METRIC_PACKETS, 1))
+# Packets only: the bytes of a packet nobody accepted say nothing a reader acts on.
+REFUSED_METRICS = ((METRIC_REJECTED_PACKETS, 1),)
+
+
+def to_series(totals, offset_ms=0, metrics=TRAFFIC_METRICS):
     """One Prometheus series per (labels, metric), samples ordered by instant.
+
+    `metrics` names each metric and which of `[bytes, packets]` it carries.
 
     Every bucket goes out, the newest one included -- see the note where
     `CUTOFF_SECONDS` used to be for what holding one back cost.
     """
     grouped = defaultdict(list)
 
-    for (bucket, labels), (byte_count, packet_count) in sorted(totals.items()):
+    for (bucket, labels), values in sorted(totals.items()):
         timestamp_ms = bucket * 1000 + offset_ms
-        grouped[(labels, METRIC_BYTES)].append((timestamp_ms, byte_count))
-        grouped[(labels, METRIC_PACKETS)].append((timestamp_ms, packet_count))
+        for metric, index in metrics:
+            grouped[(labels, metric)].append((timestamp_ms, values[index]))
 
     series = []
     for (labels, metric), samples in grouped.items():
@@ -1310,7 +1406,8 @@ def lambda_handler(event, context):
     diagnostics['addresses_unnamed'] = sum(1 for name, _ in owners.values() if not name)
 
     totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, owners))
-    edge_series = to_series(totals, offset_ms)
+    refused = cut_to_top_n(accumulate_refused(records, cidrs, diagnostics, owners))
+    edge_series = to_series(totals, offset_ms) + to_series(refused, offset_ms, REFUSED_METRICS)
 
     if not edge_series:
         print('Nothing to write. Diagnostics: ' + json.dumps(dict(diagnostics)))
