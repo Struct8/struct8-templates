@@ -37,13 +37,24 @@ service, the generic Amazon range, and an address outside every AWS range).
 
 `v1/user_data/PrivateTrafficGenerator.sh` — the `user_data` of the traffic
 generators in the private subnets: the private instance of `vpc-a` and the launch
-template of the Auto Scaling group in `vpc-b`. Every 15 seconds it writes, reads
-and deletes an object in the bucket wired to the node, writes and reads an item in
-the wired table, pings every address in `PING_TARGET` when the node sets it, and
-curls two addresses on the internet. Each destination is read from
-`/etc/struct8_env` and skipped when its variable is missing, so one script serves
-both nodes: the instance has a bucket and a table, the group has a table and pings
-the private instance and the NAT instance of `vpc-a` across the peering.
+template of the Auto Scaling group in `vpc-b`. Every part is switched on by a
+variable in `/etc/struct8_env` and skipped when it is missing, so one script
+serves both nodes:
+
+| Variable | What the node does |
+|---|---|
+| `AWS_S3_BUCKET_NAME_0` | writes, reads and deletes an object in the wired bucket |
+| `AWS_DYNAMODB_TABLE_NAME_0` | writes and reads an item in the wired table |
+| `PING_TARGET` | pings each address (ICMP) |
+| `PROBE` | opens one conversation per `host:port/tcp` or `host:port/udp` |
+| `LISTEN` | answers on each `port/tcp` (an HTTP response) and `port/udp` (an echo) |
+
+In the lab, the private instance of `vpc-a` has a bucket, a table and
+`LISTEN="80/tcp 53/udp"`; the group has a table, pings the private instance and
+the NAT instance, and probes the private instance on 22/tcp, 80/tcp and 53/udp.
+The security group of the private instance admits exactly those four from the
+group's subnet, one rule per protocol, so the Traffic layer shows ICMP, SSH, HTTP
+and DNS between the two VPCs.
 
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under
