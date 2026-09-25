@@ -11,8 +11,9 @@
 #   (AWS_S3_BUCKET_NAME_0)             through the S3 gateway endpoint
 #   the table wired to the node        put and get of one item, through the
 #   (AWS_DYNAMODB_TABLE_NAME_0)        DynamoDB gateway endpoint
-#   PING_TARGET, an address set on     ten 1200-byte pings, across the VPC
-#   the node's environment variables   peering when the address is in the peer
+#   PING_TARGET, addresses set on      ten 1200-byte pings to each, across the
+#   the node's environment variables,  VPC peering when the address is in the
+#   separated by spaces                peer
 #   checkip.amazonaws.com and          one HTTPS request each, through the NAT
 #   www.google.com                     instance of the public subnet
 #
@@ -28,7 +29,7 @@ cat >/usr/local/bin/struct8-private-traffic.sh <<'EOF'
 [ -f /etc/struct8_env ] && . /etc/struct8_env
 BUCKET="${AWS_S3_BUCKET_NAME_0:-}"
 TABLE="${AWS_DYNAMODB_TABLE_NAME_0:-}"
-TARGET="${PING_TARGET:-}"
+TARGETS="${PING_TARGET:-}"
 REGION="${REGION:-us-east-1}"
 
 PAYLOAD=/var/tmp/struct8-payload.bin
@@ -45,9 +46,9 @@ while true; do
     aws dynamodb put-item --region "$REGION" --table-name "$TABLE" --item "{\"ID\":{\"S\":\"$KEY\"}}" >/dev/null 2>&1
     aws dynamodb get-item --region "$REGION" --table-name "$TABLE" --key "{\"ID\":{\"S\":\"$KEY\"}}" >/dev/null 2>&1
   fi
-  if [ -n "$TARGET" ]; then
+  for TARGET in $TARGETS; do
     ping -c 10 -i 0.2 -s 1200 -W 2 "$TARGET" >/dev/null 2>&1
-  fi
+  done
   curl -s -o /dev/null --max-time 5 https://checkip.amazonaws.com/
   curl -s -o /dev/null --max-time 5 https://www.google.com/
   sleep 15

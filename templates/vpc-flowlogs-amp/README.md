@@ -39,11 +39,11 @@ service, the generic Amazon range, and an address outside every AWS range).
 generators in the private subnets: the private instance of `vpc-a` and the launch
 template of the Auto Scaling group in `vpc-b`. Every 15 seconds it writes, reads
 and deletes an object in the bucket wired to the node, writes and reads an item in
-the wired table, pings `PING_TARGET` when the node sets it, and curls two addresses
-on the internet. Each destination is read from `/etc/struct8_env` and skipped when
-its variable is missing, so one script serves both nodes: the instance has a bucket
-and a table, the group has a table and pings the NAT instance of `vpc-a` across the
-peering.
+the wired table, pings every address in `PING_TARGET` when the node sets it, and
+curls two addresses on the internet. Each destination is read from
+`/etc/struct8_env` and skipped when its variable is missing, so one script serves
+both nodes: the instance has a bucket and a table, the group has a table and pings
+the private instance and the NAT instance of `vpc-a` across the peering.
 
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under
