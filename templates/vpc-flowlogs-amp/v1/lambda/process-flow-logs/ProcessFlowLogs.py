@@ -98,19 +98,28 @@ DESCRIBE_TTL_SECONDS = int(os.environ.get('DESCRIBE_TTL_SECONDS', '600'))
 DELIVERY_PREFIX = os.environ.get('DELIVERY_PREFIX', 'AWSLogs/')
 OUTPUT_PREFIX = os.environ.get('OUTPUT_PREFIX', 'struct8/')
 
-# The time bucket, in seconds: 60 or 600 in practice, matching the flow log's
-# `max_aggregation_interval`. It is the knob that sets what the workspace bills:
-# AMP charges per sample, and a pair active all hour writes one sample per bucket.
-# Measured on the laboratory's steady hour (2026-09-25), 600 wrote about half the
-# samples of 60 -- not a tenth, because most pairs are not active every minute.
+# The time bucket, in seconds: 60 or 600 in practice. It is the knob that sets
+# what the workspace bills: AMP charges per sample.
+#
+# WHAT 600 SAVES, measured on the laboratory on 2026-09-25 by running this code
+# over the same 13 objects at both values: 43% of the samples of 60, not a tenth.
+# Two reasons. Most pairs are not active every minute. And each S3 object is its
+# own invocation writing its own sample for every bucket it touches -- about five
+# objects touch a ten-minute bucket, so a busy pair gets about five samples per
+# bucket, not one. A single writer per bucket would have written 374 samples
+# instead of 1063; that is the next lever, and it needs state across invocations.
 #
 # It must be a whole number of minutes: the reader steps its queries in multiples
 # of it, and a bucket that straddles two steps would be drawn split in two.
 #
-# 🔴 KEEP IT AT LEAST THE FLOW LOG'S AGGREGATION INTERVAL. A record carries only
-# its start, and the whole record is counted in the bucket that start falls in:
-# a flow log at 600 read with buckets of 60 puts ten minutes of traffic into one
-# minute and leaves nine empty. `records_longer_than_bucket` counts that case.
+# THE FLOW LOG'S `max_aggregation_interval` DOES NOT MATTER HERE ON NITRO. AWS
+# documents that an interface attached to a Nitro-based instance aggregates for
+# one minute or less whatever the setting, and the laboratory at 600 delivered
+# 4600 records out of 4600 shorter than a minute. Where it does apply -- a
+# non-Nitro interface -- keep this bucket at least as wide: a record is counted
+# whole in the bucket its start falls in, so a ten-minute record read with
+# buckets of 60 puts its traffic into one minute and leaves nine empty.
+# `records_longer_than_bucket` counts that case.
 BUCKET_SECONDS = int(os.environ.get('BUCKET_SECONDS', '60'))
 if BUCKET_SECONDS < 60 or BUCKET_SECONDS % 60:
     print('BUCKET_SECONDS=' + str(BUCKET_SECONDS) + ' is not a whole number of minutes; using 60')
