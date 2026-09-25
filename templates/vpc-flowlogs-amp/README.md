@@ -30,10 +30,17 @@ remote-writes the result. Remote write is protobuf framed in snappy, encoded
 by hand: **no dependency outside the runtime**, so the directory zips as it is.
 
 `v1/user_data/FlowLogTrafficGenerator.sh` — an Amazon Linux 2023 `user_data`
-script for the two lab instances. It installs a systemd unit that curls three
+script for the public traffic generator. It installs a systemd unit that curls three
 destinations every 20 seconds, which is not decoration: each one exercises a
 different branch of the endpoint collapse the aggregator performs (a named AWS
 service, the generic Amazon range, and an address outside every AWS range).
+
+`v1/user_data/PrivateTrafficGenerator.sh` — the `user_data` of the private traffic
+generator. Every 15 seconds it writes, reads and deletes an object in the bucket
+wired to the instance, writes and reads an item in the wired table, and curls two
+addresses on the internet, so the traffic leaves through the S3 endpoint, the
+DynamoDB endpoint and the NAT instance. It reads the bucket and table names from
+`/etc/struct8_env`, so the node needs `add_environment_variables_` on.
 
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under
