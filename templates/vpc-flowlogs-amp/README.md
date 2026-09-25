@@ -131,6 +131,32 @@ A refused sample is lost, and it shows: the Lambda's log prints
 `struct8_series_refused` with the series, and the count goes out as
 `struct8_flowlog_series_refused_total`.
 
+Each bucket's sample is written at the bucket's end, or at the newest record
+the run read if that is earlier, minus up to a minute to keep two runs apart.
+With a 10-minute bucket the last minute of a bucket arrives about 15 minutes
+after the bucket began, so placing the sample near the bucket's start would put
+it past the 10-minute limit.
+
+## One minute or ten
+
+The window is chosen per deployment, in two places that must agree:
+
+| Where | 1 minute | 10 minutes |
+|---|---|---|
+| Each flow log, `max_aggregation_interval` | `60` | `600` |
+| The Lambda, `BUCKET_SECONDS` | `60` | `600` |
+
+**What changes.** Workspace samples, which is what AMP bills. On the laboratory's
+steady hour, 10 minutes wrote about half the samples of 1 minute — not a tenth,
+because most pairs are not active every minute. The canvas reads the window the
+Lambda wrote with (`struct8_flowlog_bucket_seconds`) and steps its queries by it,
+so a 10-minute workspace shows one point per 10 minutes on every range.
+
+**`BUCKET_SECONDS` must be at least the flow log's interval.** A record is counted
+whole in the bucket its start falls in, so a flow log at 600 read with buckets of
+60 puts 10 minutes of traffic into one minute and leaves nine empty. When that
+happens, `struct8_flowlog_records_longer_than_bucket_total` appears.
+
 ## The flow log format is part of the contract
 
 The aggregator needs fields the **default** flow log format does not carry. The
@@ -159,7 +185,7 @@ names into the Lambda's environment, so nothing here is account-specific.
 | `AWS_PROMETHEUS_WORKSPACE_ENDPOINT_0` | from `PROMETHEUS_ENDPOINT` | Workspace remote-write endpoint |
 | `ACCOUNT` | empty | Account id, written as a series label |
 | `AWS_REGION` | `us-east-1` | Set by the runtime |
-| `BUCKET_SECONDS` | `60` | Aggregation window |
+| `BUCKET_SECONDS` | `60` | Aggregation window, in whole minutes: `60` or `600`, matching the flow log's `max_aggregation_interval` (see [One minute or ten](#one-minute-or-ten)). A value that is not a whole number of minutes falls back to `60` |
 | `EPHEMERAL_FLOOR` | `32768` | Where client ports start. A conversation whose two ports are both at or above it is labelled with this value, so no connection adds a series of its own |
 | `TOP_N_PAIRS` | `200` | Cardinality ceiling; the rest folds into one row |
 | `DELIVERY_PREFIX` | `AWSLogs/` | Where the flow log writes |

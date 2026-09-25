@@ -598,6 +598,58 @@ check('with no offset the two would land on the same instant -- the 400',
       == pfl.to_series({(BUCKET, PAIR): [1401, 13]})[0][1][0][0])
 
 
+print('\n=== where a sample lands, at a bucket of 60 and of 600 ===')
+
+check('at 60, the sample stays inside (bucket, bucket + 60]',
+      BUCKET * 1000 < sample_a[0] <= (BUCKET + 60) * 1000
+      and BUCKET * 1000 < sample_b[0] <= (BUCKET + 60) * 1000, str((sample_a[0], sample_b[0])))
+
+saved = (pfl.BUCKET_SECONDS, pfl.OFFSET_SPAN_SECONDS)
+pfl.BUCKET_SECONDS, pfl.OFFSET_SPAN_SECONDS = 600, 60
+try:
+    WIDE = 1790116800  # a multiple of 600
+    # Bucket still open: its data so far arrived five minutes in.
+    open_at = pfl.sample_instant_ms(WIDE, 43161, arrived=WIDE + 300)
+    check('at 600, an open bucket writes just before its data arrived, never ahead of it',
+          (WIDE + 240) * 1000 < open_at <= (WIDE + 300) * 1000, str(open_at - WIDE * 1000))
+    # The last minute of the bucket, delivered fifteen minutes after it began.
+    # Forward from the start, this sample could sit up to fifteen minutes behind
+    # the clock -- past the workspace's ten.
+    closed_at = pfl.sample_instant_ms(WIDE, 43161, arrived=WIDE + 900)
+    check('at 600, a closed bucket writes in its last minute, not near its start',
+          (WIDE + 540) * 1000 < closed_at <= (WIDE + 600) * 1000, str(closed_at - WIDE * 1000))
+    check('a sample never lands at or before its bucket start, whatever arrived says',
+          pfl.sample_instant_ms(WIDE, 59999, arrived=WIDE - 30) > WIDE * 1000)
+    check('the spread stays one minute wide at 600, so the retry is still the same instant',
+          pfl.write_offset_ms([KEY_A]) == offset_a, str(pfl.write_offset_ms([KEY_A])))
+
+    longer = defaultdict(int)
+    pfl.count_records_longer_than_bucket(
+        [{'start': '1790116800', 'end': '1790117400'}, {'start': '1790116800', 'end': '1790116855'}],
+        longer)
+    check('at 600, a ten-minute record is not flagged', longer['records_longer_than_bucket'] == 0,
+          str(dict(longer)))
+finally:
+    pfl.BUCKET_SECONDS, pfl.OFFSET_SPAN_SECONDS = saved
+
+longer = defaultdict(int)
+pfl.count_records_longer_than_bucket(
+    [{'start': '1790116800', 'end': '1790117400'}, {'start': '1790116800', 'end': '1790116855'},
+     {'start': '-', 'end': '-'}],
+    longer)
+check('at 60, a ten-minute record -- a flow log at 600 -- is flagged, a one-minute one is not',
+      longer['records_longer_than_bucket'] == 1, str(dict(longer)))
+
+check('newest_end reads the latest end and skips what has none',
+      pfl.newest_end([{'end': '100'}, {'end': '-'}, {'end': '250'}, {}]) == 250
+      and pfl.newest_end([{'end': '-'}]) is None)
+
+gauge = [s for labels, s in pfl.diagnostic_series({'files_processed': 1})
+         if labels['__name__'] == pfl.METRIC_BUCKET_SECONDS]
+check('every invocation writes the bucket it used, for the reader to step by',
+      len(gauge) == 1 and gauge[0][0][1] == pfl.BUCKET_SECONDS, str(gauge))
+
+
 print('\n=== the ORIGINAL address, which was never being read ===')
 
 LAB_CIDRS = [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')]

@@ -98,9 +98,29 @@ DESCRIBE_TTL_SECONDS = int(os.environ.get('DESCRIBE_TTL_SECONDS', '600'))
 DELIVERY_PREFIX = os.environ.get('DELIVERY_PREFIX', 'AWSLogs/')
 OUTPUT_PREFIX = os.environ.get('OUTPUT_PREFIX', 'struct8/')
 
-# The time bucket, in seconds. 60 matches the finest aggregation the flow log can
-# deliver, so a coarser value here only loses resolution.
+# The time bucket, in seconds: 60 or 600 in practice, matching the flow log's
+# `max_aggregation_interval`. It is the knob that sets what the workspace bills:
+# AMP charges per sample, and a pair active all hour writes one sample per bucket.
+# Measured on the laboratory's steady hour (2026-09-25), 600 wrote about half the
+# samples of 60 -- not a tenth, because most pairs are not active every minute.
+#
+# It must be a whole number of minutes: the reader steps its queries in multiples
+# of it, and a bucket that straddles two steps would be drawn split in two.
+#
+# 🔴 KEEP IT AT LEAST THE FLOW LOG'S AGGREGATION INTERVAL. A record carries only
+# its start, and the whole record is counted in the bucket that start falls in:
+# a flow log at 600 read with buckets of 60 puts ten minutes of traffic into one
+# minute and leaves nine empty. `records_longer_than_bucket` counts that case.
 BUCKET_SECONDS = int(os.environ.get('BUCKET_SECONDS', '60'))
+if BUCKET_SECONDS < 60 or BUCKET_SECONDS % 60:
+    print('BUCKET_SECONDS=' + str(BUCKET_SECONDS) + ' is not a whole number of minutes; using 60')
+    BUCKET_SECONDS = 60
+
+# How far apart two invocations writing the same bucket are spread -- see
+# `write_offset_ms`. One minute at most, whatever the bucket: the spread is
+# counted back from where the bucket's data could have arrived, and a wider one
+# would only push samples closer to the workspace's ten-minute limit.
+OFFSET_SPAN_SECONDS = min(BUCKET_SECONDS, 60)
 
 # 🔴 THERE IS NO WAIT FOR A BUCKET TO CLOSE, and there used to be one.
 # `CUTOFF_SECONDS` skipped every bucket that started less than that long ago, on
@@ -152,6 +172,8 @@ METRIC_PACKETS = 'struct8_edge_packets'
 # own, never added to the two above: a refused packet reached nothing. See
 # `accumulate_refused`.
 METRIC_REJECTED_PACKETS = 'struct8_edge_rejected_packets'
+# The bucket the three above were written with. See `diagnostic_series`.
+METRIC_BUCKET_SECONDS = 'struct8_flowlog_bucket_seconds'
 
 s3 = boto3.client('s3')
 ec2 = boto3.client('ec2')
@@ -1240,7 +1262,53 @@ def write_offset_ms(keys):
     Only a writer that sees the whole minute fixes that one.
     """
     digest = hashlib.sha256('\n'.join(sorted(keys)).encode('utf-8')).digest()
-    return int.from_bytes(digest[:4], 'big') % (BUCKET_SECONDS * 1000)
+    return int.from_bytes(digest[:4], 'big') % (OFFSET_SPAN_SECONDS * 1000)
+
+
+def newest_end(records):
+    """The latest `end` among the records read, or None when none carries one.
+
+    It is the closest thing to "when did this data arrive" that the data itself
+    says: a file is delivered after its newest record ends. Taken from the
+    records and not from the clock, so a retry of the same objects lands on the
+    same instant -- the property `write_offset_ms` exists for.
+    """
+    ends = []
+    for record in records:
+        raw = value_of(record, 'end')
+        if raw is None:
+            continue
+        try:
+            ends.append(int(raw))
+        except ValueError:
+            continue
+    return max(ends) if ends else None
+
+
+def sample_instant_ms(bucket, offset_ms, arrived=None):
+    """Where a bucket's sample goes: inside `(bucket, bucket + BUCKET_SECONDS]`.
+
+    🔴 COUNTED BACK FROM THE END OF THE BUCKET, OR FROM WHEN ITS DATA ARRIVED IF
+    THAT IS EARLIER -- NEVER FORWARD FROM THE START. The workspace refuses a
+    sample more than ten minutes older than the newest one it holds (see the
+    note where `CUTOFF_SECONDS` used to be). Forward from the start was fine at
+    60 seconds. At 600 it is not: the last minute of a bucket arrives about
+    fifteen minutes after the bucket began, and a sample placed near that start
+    is refused. It also placed the first minutes' samples ahead of the clock.
+
+    `arrived` is `newest_end` of what this invocation read. While the bucket is
+    still open it is earlier than the bucket's end, and the sample goes just
+    before it: never in the future, and as recent as the data allows.
+
+    The reader sums `(t - step, t]` with `t` on multiples of the bucket, so a
+    sample anywhere in the interval lands in its own bucket.
+    """
+    anchor = bucket + BUCKET_SECONDS
+    if arrived is not None:
+        anchor = min(anchor, arrived)
+    # Never at or before the bucket's own start, whatever `arrived` says.
+    anchor = max(anchor, bucket + OFFSET_SPAN_SECONDS)
+    return anchor * 1000 - offset_ms
 
 
 TRAFFIC_METRICS = ((METRIC_BYTES, 0), (METRIC_PACKETS, 1))
@@ -1248,10 +1316,11 @@ TRAFFIC_METRICS = ((METRIC_BYTES, 0), (METRIC_PACKETS, 1))
 REFUSED_METRICS = ((METRIC_REJECTED_PACKETS, 1),)
 
 
-def to_series(totals, offset_ms=0, metrics=TRAFFIC_METRICS):
+def to_series(totals, offset_ms=0, metrics=TRAFFIC_METRICS, arrived=None):
     """One Prometheus series per (labels, metric), samples ordered by instant.
 
     `metrics` names each metric and which of `[bytes, packets]` it carries.
+    `arrived` places each sample -- see `sample_instant_ms`.
 
     Every bucket goes out, the newest one included -- see the note where
     `CUTOFF_SECONDS` used to be for what holding one back cost.
@@ -1259,7 +1328,7 @@ def to_series(totals, offset_ms=0, metrics=TRAFFIC_METRICS):
     grouped = defaultdict(list)
 
     for (bucket, labels), values in sorted(totals.items()):
-        timestamp_ms = bucket * 1000 + offset_ms
+        timestamp_ms = sample_instant_ms(bucket, offset_ms, arrived)
         for metric, index in metrics:
             grouped[(labels, metric)].append((timestamp_ms, values[index]))
 
@@ -1297,7 +1366,29 @@ def diagnostic_series(diagnostics):
             {'__name__': 'struct8_flowlog_' + name + '_total'},
             [(timestamp_ms, value)],
         ))
+    # The bucket this invocation wrote with, so the reader can step its queries
+    # by it instead of assuming a minute: a 600-second bucket read at 60 draws
+    # nine empty minutes and one tenfold. A gauge, not a counter -- and the same
+    # value from every invocation, so two landing on one instant do not collide.
+    out.append(({'__name__': METRIC_BUCKET_SECONDS}, [(timestamp_ms, BUCKET_SECONDS)]))
     return out
+
+
+def count_records_longer_than_bucket(records, diagnostics):
+    """Counts records spanning more than two buckets: the flow log's aggregation
+    interval is wider than `BUCKET_SECONDS`, and each such record lands whole in
+    the bucket its start falls in. Written only when it happens, so a consistent
+    setup pays nothing for the check.
+    """
+    for record in records:
+        start, end = value_of(record, 'start'), value_of(record, 'end')
+        if start is None or end is None:
+            continue
+        try:
+            if int(end) - int(start) > 2 * BUCKET_SECONDS:
+                diagnostics['records_longer_than_bucket'] += 1
+        except ValueError:
+            continue
 
 
 def report_delivery_delay(key, records, now):
@@ -1405,9 +1496,13 @@ def lambda_handler(event, context):
     diagnostics['addresses_named'] = sum(1 for name, _ in owners.values() if name)
     diagnostics['addresses_unnamed'] = sum(1 for name, _ in owners.values() if not name)
 
+    count_records_longer_than_bucket(records, diagnostics)
+    arrived = newest_end(records)
+
     totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, owners))
     refused = cut_to_top_n(accumulate_refused(records, cidrs, diagnostics, owners))
-    edge_series = to_series(totals, offset_ms) + to_series(refused, offset_ms, REFUSED_METRICS)
+    edge_series = (to_series(totals, offset_ms, arrived=arrived)
+                   + to_series(refused, offset_ms, REFUSED_METRICS, arrived=arrived))
 
     if not edge_series:
         print('Nothing to write. Diagnostics: ' + json.dumps(dict(diagnostics)))
