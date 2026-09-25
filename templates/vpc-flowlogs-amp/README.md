@@ -35,12 +35,15 @@ destinations every 20 seconds, which is not decoration: each one exercises a
 different branch of the endpoint collapse the aggregator performs (a named AWS
 service, the generic Amazon range, and an address outside every AWS range).
 
-`v1/user_data/PrivateTrafficGenerator.sh` — the `user_data` of the private traffic
-generator. Every 15 seconds it writes, reads and deletes an object in the bucket
-wired to the instance, writes and reads an item in the wired table, and curls two
-addresses on the internet, so the traffic leaves through the S3 endpoint, the
-DynamoDB endpoint and the NAT instance. It reads the bucket and table names from
-`/etc/struct8_env`, so the node needs `add_environment_variables_` on.
+`v1/user_data/PrivateTrafficGenerator.sh` — the `user_data` of the traffic
+generators in the private subnets: the private instance of `vpc-a` and the launch
+template of the Auto Scaling group in `vpc-b`. Every 15 seconds it writes, reads
+and deletes an object in the bucket wired to the node, writes and reads an item in
+the wired table, pings `PING_TARGET` when the node sets it, and curls two addresses
+on the internet. Each destination is read from `/etc/struct8_env` and skipped when
+its variable is missing, so one script serves both nodes: the instance has a bucket
+and a table, the group has a table and pings the NAT instance of `vpc-a` across the
+peering.
 
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under

@@ -1,19 +1,23 @@
 #!/bin/bash
-# Boot script of traffic-gen-private, in the VPC Flow Logs + Managed Prometheus
-# lab.
+# Boot script of the traffic generators in the private subnets of the VPC Flow
+# Logs + Managed Prometheus lab: traffic-gen-private, and every instance
+# traffic-gen-asg launches.
 #
-# Every 15 seconds it talks to three kinds of destination, each leaving vpc-a
-# through a different door, so the Traffic layer has one line per door:
+# Every 15 seconds it talks to each destination the node was given, each one
+# leaving the VPC through a different door, so the Traffic layer has one line
+# per door:
 #
-#   the bucket wired to the instance   put, get and delete of a 256 KB object,
+#   the bucket wired to the node       put, get and delete of a 256 KB object,
 #   (AWS_S3_BUCKET_NAME_0)             through the S3 gateway endpoint
-#   the table wired to the instance    put and get of one item, through the
+#   the table wired to the node        put and get of one item, through the
 #   (AWS_DYNAMODB_TABLE_NAME_0)        DynamoDB gateway endpoint
+#   PING_TARGET, an address set on     ten 1200-byte pings, across the VPC
+#   the node's environment variables   peering when the address is in the peer
 #   checkip.amazonaws.com and          one HTTPS request each, through the NAT
 #   www.google.com                     instance of the public subnet
 #
 # The names come from /etc/struct8_env, which the compile writes when the node
-# has add_environment_variables_ on. A destination whose name is missing is
+# has environment variables on. A destination whose variable is missing is
 # skipped, and the others keep running.
 #
 # The object is deleted right after it is read, so the bucket stays empty and a
@@ -24,6 +28,7 @@ cat >/usr/local/bin/struct8-private-traffic.sh <<'EOF'
 [ -f /etc/struct8_env ] && . /etc/struct8_env
 BUCKET="${AWS_S3_BUCKET_NAME_0:-}"
 TABLE="${AWS_DYNAMODB_TABLE_NAME_0:-}"
+TARGET="${PING_TARGET:-}"
 REGION="${REGION:-us-east-1}"
 
 PAYLOAD=/var/tmp/struct8-payload.bin
@@ -40,6 +45,9 @@ while true; do
     aws dynamodb put-item --region "$REGION" --table-name "$TABLE" --item "{\"ID\":{\"S\":\"$KEY\"}}" >/dev/null 2>&1
     aws dynamodb get-item --region "$REGION" --table-name "$TABLE" --key "{\"ID\":{\"S\":\"$KEY\"}}" >/dev/null 2>&1
   fi
+  if [ -n "$TARGET" ]; then
+    ping -c 10 -i 0.2 -s 1200 -W 2 "$TARGET" >/dev/null 2>&1
+  fi
   curl -s -o /dev/null --max-time 5 https://checkip.amazonaws.com/
   curl -s -o /dev/null --max-time 5 https://www.google.com/
   sleep 15
@@ -49,7 +57,7 @@ chmod +x /usr/local/bin/struct8-private-traffic.sh
 
 cat >/etc/systemd/system/struct8-private-traffic.service <<'UNIT'
 [Unit]
-Description=Traffic generator of the private subnet, for the VPC flow log lab
+Description=Traffic generator of a private subnet, for the VPC flow log lab
 After=network-online.target
 Wants=network-online.target
 
