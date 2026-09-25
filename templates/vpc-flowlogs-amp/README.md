@@ -50,11 +50,11 @@ serves both nodes:
 | `LISTEN` | answers on each `port/tcp` (an HTTP response) and `port/udp` (an echo) |
 
 In the lab, the private instance of `vpc-a` has a bucket, a table and
-`LISTEN="80/tcp 53/udp"`; the group has a table, pings the private instance and
-the NAT instance, and probes the private instance on 22/tcp, 80/tcp and 53/udp.
-The security group of the private instance admits exactly those four from the
-group's subnet, one rule per protocol, so the Traffic layer shows ICMP, SSH, HTTP
-and DNS between the two VPCs.
+`LISTEN="80/tcp 53/udp"`; the group has a table, pings the private instance, and
+probes it on 22/tcp, 80/tcp and 53/udp. The security group of the private
+instance admits exactly those four, one rule per protocol, and each rule names
+the group's security group as its source instead of an address range. The
+Traffic layer shows ICMP, SSH, HTTP and DNS between the two VPCs.
 
 `v1/user_data/Nat.sh` — the NAT instance bootstrap, so the private subnet reaches
 the internet without a NAT gateway. It is a **copy** of the one under
