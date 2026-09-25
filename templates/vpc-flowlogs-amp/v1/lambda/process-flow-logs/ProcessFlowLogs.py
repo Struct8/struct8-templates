@@ -25,6 +25,8 @@ import ipaddress
 import json
 import os
 import random
+import re
+import socket
 import struct
 import time
 import urllib.error
@@ -148,6 +150,11 @@ METRIC_PACKETS = 'struct8_edge_packets'
 
 s3 = boto3.client('s3')
 ec2 = boto3.client('ec2')
+# Read only when an address belongs to a load balancer, a database or a Lambda
+# function, to find that resource's Name tag. See `owners_for_addresses`.
+elbv2 = boto3.client('elbv2')
+rds = boto3.client('rds')
+lambda_client = boto3.client('lambda')
 
 
 # --- protobuf, by hand ------------------------------------------------------------
@@ -376,7 +383,9 @@ def value_of(record, name):
 # Module level on purpose: this is the only state that survives, and the whole
 # point is not to ask EC2 the same question once per delivered object.
 _cidrs_cache = {'expires_at': 0.0, 'blocks': []}
-_name_by_address = {}
+_vpc_name_by_id = {}
+_owner_by_address = {}
+_rds_cache = {'expires_at': 0.0, 'by_address': {}}
 
 
 def _expiry():
@@ -399,83 +408,261 @@ def _expiry():
 # of a whole batch.
 ADDRESS_CHUNK = 100
 
-# The tag AWS writes on every instance an Auto Scaling group launches. Its value is
-# the group's name in the account, which is also how the group's ARN ends -- so it
-# finds the group's box on the canvas, where the Name tag only repeats a label.
-AUTO_SCALING_GROUP_TAG = 'aws:autoscaling:groupName'
+# What an end is called when nothing it belongs to carries a Name tag. One value
+# per VPC (the `_vpc` label keeps them apart), so the volume still adds up in the
+# totals while landing on no box.
+UNNAMED = 'unnamed'
+
+# The resource id inside an interface's description, for the owners whose id
+# is only written there.
+_NAT_ID = re.compile(r'\b(nat-[0-9a-f]+)\b')
+_ENDPOINT_ID = re.compile(r'\b(vpce-[0-9a-f]+)\b')
+# `ELB app/<name>/<id>` or `ELB net/<name>/<id>`; a Classic one is `ELB <name>`.
+_LOAD_BALANCER = re.compile(r'^ELB (?:(app|net|gwy)/([^/]+)/([0-9a-f]+)|([^\s/]+))$')
+# `AWS Lambda VPC ENI-<function>-<uuid>`: the function name may hold hyphens, the
+# trailing uuid is what separates it.
+_LAMBDA_ENI = re.compile(
+    r'^AWS Lambda VPC ENI-(.+?)(?:-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$')
 
 
-def names_for_addresses(addresses):
-    """`address -> Name tag`, asking EC2 only for what is missing or stale.
+def _name_tag(tags):
+    """The Name tag from a list of `{Key, Value}` pairs, or ''."""
+    for tag in tags or []:
+        if tag.get('Key') == 'Name':
+            return tag.get('Value', '')
+    return ''
 
-    FILTERED BY ADDRESS, NOT BY INSTANCE ID, and that is what makes one call
-    serve both ends of a flow. A record names the instance of the interface that
-    CAPTURED it -- the sender, on an egress record -- so the destination inside
-    the VPC arrives as an address and nothing else. Looking both up by address
-    names the two ends with the same answer.
 
-    AND FILTERED, NOT LISTED BY ID: `describe_instances(InstanceIds=[...])` fails
-    the whole call when one id no longer exists, and an instance that has just
-    been replaced is exactly what this is asked about. A filter returns what it
-    finds and says nothing about the rest.
+def owner_of_interface(interface):
+    """What an interface belongs to: `(kind, id to read the Name tag by, fallback name)`.
 
-    An address EC2 does not know -- the interface of a load balancer, of a
-    database, of a Lambda in a VPC -- is cached as having no name, so the miss is
-    not paid again on every object.
+    AN INTERFACE IS NOT A RESOURCE, and its own Name tag is almost never set: the
+    instance, the NAT gateway or the load balancer that owns it is what the
+    diagram draws, and what carries the tag the generator wrote. Each kind of
+    owner leaves its mark in a different field, so each is read where AWS puts it.
+
+    The fallback is the owner's own name where it has one (a load balancer, a
+    function): the generator names those after the box, so without permission
+    to read the tag the answer is usually the same.
+    """
+    attachment = interface.get('Attachment') or {}
+    kind = interface.get('InterfaceType') or ''
+    description = interface.get('Description') or ''
+    account = interface.get('OwnerId') or ACCOUNT
+
+    if attachment.get('InstanceId'):
+        return 'instance', attachment['InstanceId'], ''
+    if kind == 'nat_gateway':
+        match = _NAT_ID.search(description)
+        return 'nat_gateway', match.group(1) if match else None, ''
+    if kind in ('vpc_endpoint', 'gateway_load_balancer_endpoint'):
+        match = _ENDPOINT_ID.search(description)
+        return 'vpc_endpoint', match.group(1) if match else None, ''
+    balancer = _LOAD_BALANCER.match(description)
+    if balancer:
+        if balancer.group(1):
+            arn = ('arn:aws:elasticloadbalancing:' + REGION + ':' + account + ':loadbalancer/'
+                   + balancer.group(1) + '/' + balancer.group(2) + '/' + balancer.group(3))
+            return 'load_balancer', arn, balancer.group(2)
+        return 'load_balancer', None, balancer.group(4)
+    function = _LAMBDA_ENI.match(description)
+    if kind == 'lambda' or function:
+        name = function.group(1) if function else ''
+        arn = ('arn:aws:lambda:' + REGION + ':' + account + ':function:' + name) if name else None
+        return 'lambda', arn, name
+    if description == 'RDSNetworkInterface':
+        # No database id anywhere on the interface; the address is the key, see
+        # `_rds_names_by_address`.
+        return 'rds', None, ''
+    if description.startswith('arn:aws:ecs:'):
+        return 'ecs_task', None, ''
+    return kind or 'network_interface', None, ''
+
+
+def _paginated(client, operation, key, **kwargs):
+    for page in client.get_paginator(operation).paginate(**kwargs):
+        for item in page.get(key, []):
+            yield item
+
+
+def _tags_by_id(kind, ids):
+    """`id -> Name tag` for owners of one kind, in as few calls as the API allows."""
+    ids = sorted(set(ids))
+    out = {}
+    if not ids:
+        return out
+    if kind == 'instance':
+        # Filtered, not listed by id: `InstanceIds=[...]` fails the whole call
+        # when one of them no longer exists, and an instance that has just been
+        # replaced is exactly what this is asked about.
+        for reservation in _paginated(ec2, 'describe_instances', 'Reservations',
+                                      Filters=[{'Name': 'instance-id', 'Values': ids}]):
+            for instance in reservation.get('Instances', []):
+                out[instance['InstanceId']] = _name_tag(instance.get('Tags'))
+    elif kind == 'nat_gateway':
+        for gateway in _paginated(ec2, 'describe_nat_gateways', 'NatGateways',
+                                  Filters=[{'Name': 'nat-gateway-id', 'Values': ids}]):
+            out[gateway['NatGatewayId']] = _name_tag(gateway.get('Tags'))
+    elif kind == 'vpc_endpoint':
+        for endpoint in _paginated(ec2, 'describe_vpc_endpoints', 'VpcEndpoints',
+                                   Filters=[{'Name': 'vpc-endpoint-id', 'Values': ids}]):
+            out[endpoint['VpcEndpointId']] = _name_tag(endpoint.get('Tags'))
+    elif kind == 'load_balancer':
+        for start in range(0, len(ids), 20):
+            batch = ids[start:start + 20]
+            try:
+                answers = [elbv2.describe_tags(ResourceArns=batch)]
+            except Exception:  # noqa: BLE001
+                # ONE load balancer that no longer exists fails the whole call
+                # (`LoadBalancerNotFound`, measured 2026-09-25), so the batch is
+                # asked again one by one and only the missing one goes without.
+                answers = []
+                for arn in batch:
+                    try:
+                        answers.append(elbv2.describe_tags(ResourceArns=[arn]))
+                    except Exception as error:  # noqa: BLE001
+                        print('describe_tags failed for ' + arn + ': ' + str(error))
+            for answer in answers:
+                for description in answer.get('TagDescriptions', []):
+                    out[description['ResourceArn']] = _name_tag(description.get('Tags'))
+    elif kind == 'lambda':
+        for arn in ids:
+            try:
+                out[arn] = (lambda_client.list_tags(Resource=arn).get('Tags') or {}).get('Name', '')
+            except Exception as error:  # noqa: BLE001 -- one function must not cost the others
+                print('list_tags failed for ' + arn + ': ' + str(error))
+    return out
+
+
+def _rds_names_by_address():
+    """`address -> Name tag` for every database this account runs here.
+
+    A database's interface carries neither its identifier nor a tag -- only the
+    description `RDSNetworkInterface` -- so the way from an address to a database
+    is the other direction: every instance's endpoint, resolved. The endpoint of
+    a private database still resolves from outside the VPC, to its private
+    address, which is the one the flow log records.
+    """
+    if _rds_cache['expires_at'] > time.time():
+        return _rds_cache['by_address']
+    by_address = {}
+    for database in _paginated(rds, 'describe_db_instances', 'DBInstances'):
+        host = (database.get('Endpoint') or {}).get('Address')
+        if not host:
+            continue
+        name = _name_tag(database.get('TagList')) or database.get('DBInstanceIdentifier', '')
+        try:
+            for info in socket.getaddrinfo(host, None):
+                by_address[info[4][0]] = name
+        except OSError:
+            continue
+    _rds_cache['by_address'] = by_address
+    _rds_cache['expires_at'] = _expiry()
+    return by_address
+
+
+def _describe_interfaces(chunk):
+    """Every interface holding one of these addresses, IPv4 and IPv6 alike."""
+    v4 = [a for a in chunk if ':' not in a]
+    v6 = [a for a in chunk if ':' in a]
+    interfaces = []
+    if v4:
+        interfaces += list(_paginated(
+            ec2, 'describe_network_interfaces', 'NetworkInterfaces',
+            Filters=[{'Name': 'addresses.private-ip-address', 'Values': v4}]))
+    if v6:
+        interfaces += list(_paginated(
+            ec2, 'describe_network_interfaces', 'NetworkInterfaces',
+            Filters=[{'Name': 'ipv6-addresses.ipv6-address', 'Values': v6}]))
+    return interfaces
+
+
+def _addresses_of(interface):
+    out = [entry.get('PrivateIpAddress') for entry in interface.get('PrivateIpAddresses', [])]
+    out += [entry.get('Ipv6Address') for entry in interface.get('Ipv6Addresses', [])]
+    return [address for address in out if address]
+
+
+def owners_for_addresses(addresses):
+    """`address -> (Name tag of what owns it, kind of owner)`, asking only for what
+    is missing or stale.
+
+    🔴 THE NAME IS THE IDENTITY OF AN END, NOT THE INSTANCE ID. A batch instance
+    that is terminated and launched again, or an Auto Scaling group that goes to
+    zero and back, comes back with new ids and the same Name tag -- and the
+    diagram draws one box for it, under that name. Series keyed by the tag stay
+    ONE series across every replacement; keyed by the id they would break at
+    each one, and the box's history would stop at its last instance.
+
+    The tag is the one the generator writes on everything it creates, with the
+    box's logical name. An Auto Scaling group propagates it at launch, so every
+    instance of the group carries the group's name.
+
+    FROM THE INTERFACE TO ITS OWNER. One `describe_network_interfaces` by address
+    says who owns each one -- an instance, a NAT gateway, an endpoint, a load
+    balancer, a Lambda function, a database -- and then each kind is asked for
+    its Name tag, once per kind per batch.
+
+    An address nobody owns any more, or whose owner has no Name tag, is cached as
+    nameless, so the miss is not paid again on every object.
     """
     now = time.time()
     unknown = sorted(
         address for address in addresses
-        if address and _name_by_address.get(address, {}).get('expires_at', 0.0) <= now
+        if address and _owner_by_address.get(address, {}).get('expires_at', 0.0) <= now
     )
 
     for start in range(0, len(unknown), ADDRESS_CHUNK):
         chunk = unknown[start:start + ADDRESS_CHUNK]
-        found = {}
         try:
-            paginator = ec2.get_paginator('describe_instances')
-            for page in paginator.paginate(
-                    Filters=[{'Name': 'private-ip-address', 'Values': chunk}]):
-                for reservation in page.get('Reservations', []):
-                    for instance in reservation.get('Instances', []):
-                        name = ''
-                        group = ''
-                        for tag in instance.get('Tags', []):
-                            if tag.get('Key') == 'Name':
-                                name = tag.get('Value', '')
-                            elif tag.get('Key') == AUTO_SCALING_GROUP_TAG:
-                                group = tag.get('Value', '')
-                        for interface in instance.get('NetworkInterfaces', []):
-                            for entry in interface.get('PrivateIpAddresses', []):
-                                address = entry.get('PrivateIpAddress')
-                                if address:
-                                    found[address] = (name, group)
+            interfaces = _describe_interfaces(chunk)
         except Exception as error:  # noqa: BLE001 -- a name is worth less than the run
             # Nothing is cached: a transport failure is not evidence that these
-            # addresses have no name, and caching it as one would hide the
+            # addresses have no owner, and caching it as one would hide the
             # resource until the entry expired.
-            print('describe_instances failed for ' + str(len(chunk))
+            print('describe_network_interfaces failed for ' + str(len(chunk))
                   + ' addresses: ' + str(error))
             continue
+
+        owned = {}  # address -> (kind, owner id, fallback name, the interface's own Name tag)
+        wanted = defaultdict(set)
+        for interface in interfaces:
+            kind, owner_id, fallback = owner_of_interface(interface)
+            own_tag = _name_tag(interface.get('TagSet'))
+            for address in _addresses_of(interface):
+                owned[address] = (kind, owner_id, fallback, own_tag)
+            if owner_id:
+                wanted[kind].add(owner_id)
+
+        tags = {}
+        for kind, ids in wanted.items():
+            try:
+                tags.update(_tags_by_id(kind, ids))
+            except Exception as error:  # noqa: BLE001 -- the fallback name still answers
+                # A missing permission lands here, and would land here again on
+                # the next object: the fallback is cached like any other answer.
+                print('reading the Name tag of ' + kind + ' failed: ' + str(error))
+
+        databases = {}
+        if any(entry[0] == 'rds' for entry in owned.values()):
+            try:
+                databases = _rds_names_by_address()
+            except Exception as error:  # noqa: BLE001
+                print('describe_db_instances failed: ' + str(error))
+
         for address in chunk:
-            name, group = found.get(address, ('', ''))
-            _name_by_address[address] = {'name': name, 'group': group,
-                                         'expires_at': _expiry()}
+            kind, owner_id, fallback, own_tag = owned.get(address, ('', None, '', ''))
+            name = ((tags.get(owner_id, '') if owner_id else '')
+                    or databases.get(address, '') or fallback or own_tag)
+            _owner_by_address[address] = {'name': name, 'kind': kind, 'expires_at': _expiry()}
 
-    return {address: entry['name']
-            for address, entry in _name_by_address.items() if entry['name']}
-
-
-def groups_for_addresses():
-    """`address -> Auto Scaling group`, from what `names_for_addresses` read.
-
-    No call of its own: the describe that names an address already carries the tag
-    AWS puts on every instance a group launches. Call it after naming the batch.
-    """
-    return {address: entry['group']
-            for address, entry in _name_by_address.items() if entry.get('group')}
+    return {address: (entry['name'], entry['kind'])
+            for address, entry in _owner_by_address.items() if entry['name'] or entry['kind']}
 
 
+def vpc_label(vpc_id):
+    """The VPC an end sits in, by its Name tag -- the box the diagram draws."""
+    return _vpc_name_by_id.get(vpc_id) or UNNAMED
 def addresses_in(records, cidrs):
     """Every in-VPC address the batch mentions -- what is worth describing.
 
@@ -486,10 +673,13 @@ def addresses_in(records, cidrs):
     out = set()
     for record in records:
         for side in ('src', 'dst'):
-            address = (value_of(record, 'pkt-' + side + 'addr')
-                       or value_of(record, side + 'addr') or '')
-            if address and scope_of_address(address, cidrs):
-                out.add(address)
+            # BOTH spellings of the address: the original one names the ends of a
+            # conversation, and the rewritten one names the ends of a hop through
+            # a middlebox (`name_endpoint` with `hop`), which need a name too.
+            for field in ('pkt-' + side + 'addr', side + 'addr'):
+                address = value_of(record, field) or ''
+                if address and scope_of_address(address, cidrs):
+                    out.add(address)
     return out
 
 
@@ -502,6 +692,9 @@ def known_cidrs():
     paginator = ec2.get_paginator('describe_vpcs')
     for page in paginator.paginate():
         for vpc in page.get('Vpcs', []):
+            # The same answer names the VPC: `_vpc` on a series is the box's
+            # name, because the VPC id changes whenever the VPC is recreated.
+            _vpc_name_by_id[vpc['VpcId']] = _name_tag(vpc.get('Tags'))
             for association in vpc.get('CidrBlockAssociationSet', []):
                 block = association.get('CidrBlock')
                 if block:
@@ -607,30 +800,25 @@ def capturing_side(record):
     return 'dst' if value_of(record, 'flow-direction') == 'ingress' else 'src'
 
 
-def name_endpoint(record, side, cidrs, names=None, hop=False, groups=None):
-    """Returns the labels for one end: id, address, scope, type and name, plus the
-    Auto Scaling group when the end is an instance one launched.
+def name_endpoint(record, side, cidrs, owners=None, hop=False):
+    """Returns the labels for one end: its name, the kind of thing it is, and the
+    VPC it sits in.
 
-    Identity before address, because an address is reassigned and an id is not. Both
-    are emitted when both exist: a disagreement between them is the only free signal
-    that the address map has gone stale.
+    🔴 THE NAME IS THE WHOLE IDENTITY. No instance id, no address, no VPC id goes
+    out: every one of them changes when the resource is replaced, and a series
+    keyed by any of them would break at each replacement while the diagram keeps
+    drawing one box. The name is the Name tag the generator writes with the box's
+    logical name, and an Auto Scaling group propagates it to every instance it
+    launches, so the whole group arrives under the group's name and one series
+    holds it across every scale-in and scale-out. See `owners_for_addresses`.
 
-    THE NAME IS WHAT GROUPS SIBLINGS, and it is the box's own name: the generator
-    writes `tags["Name"] = <logical name>` on everything it creates, and an Auto
-    Scaling group writes it with `propagate_at_launch`, so every instance the
-    group raises is born carrying it. That is why `src_id` stays per-instance and
-    the collapse happens on `src_name`: summing by name gives the group, summing
-    by id gives the machine, and neither is thrown away.
+    `_type` is what the end is (instance, nat_gateway, load_balancer, ...), read
+    from the interface's owner, so both ends of a conversation are described the
+    same way whichever of them captured the record. `_vpc` is the VPC's Name tag.
 
-    THE GROUP IS WHAT FINDS THE GROUP'S BOX. The canvas lands an end by id or by
-    address, and a group's box holds neither of its instances: its status carries
-    the group's ARN, which ends with the group's name. `src_group` is that name,
-    read from the tag AWS puts on the instance -- a Name tag is a label, and two
-    boxes can share one. Absent, not empty, on anything a group did not launch.
-
-    Read from the RECORD first. With `tag_field_specification` the flow log
-    carries the tag itself, and then nothing has to be described at all -- the
-    describe below is the fallback, not the design.
+    Read from the RECORD first where it says more: `ecs-service-name` names a task
+    by its service, and `instance-tag`, when the flow log carries it, is the tag
+    AWS stamped. Both only describe the interface that CAPTURED the record.
     """
     if hop:
         # THE HOP'S OWN ADDRESSES, and only those: on a hop record the two ends
@@ -641,42 +829,26 @@ def name_endpoint(record, side, cidrs, names=None, hop=False, groups=None):
     scope = scope_of_address(address, cidrs)
 
     if scope:
-        identifier = ''
-        kind = 'address'
-        # 🔴 ON A HOP RECORD, `instance-id`, `interface-type` and `instance-tag`
-        # all describe THE INTERFACE THAT CAPTURED IT -- the middlebox -- while
-        # the source of an outbound hop is the machine that sent TO it. Naming
-        # the source with them would move a sender's whole traffic onto the
-        # forwarder: the wrong box, carrying a number that looks right. Both ends
-        # of a hop are named by ADDRESS alone, which is all the record asserts
-        # about them, and the canvas already lands an address on its node.
-        owner = capturing_side(record)
-        if side == owner and not hop:
-            identifier = value_of(record, 'instance-id') or ''
-            if identifier:
-                kind = 'instance'
+        name, kind = (owners or {}).get(address, ('', ''))
+        # 🔴 ON A HOP RECORD, `instance-id`, `interface-type`, `instance-tag` and
+        # `ecs-service-name` all describe THE INTERFACE THAT CAPTURED IT -- the
+        # middlebox -- while the source of an outbound hop is the machine that
+        # sent TO it. Naming the source with them would move a sender's whole
+        # traffic onto the forwarder: the wrong box, carrying a number that looks
+        # right. Both ends of a hop are named through their ADDRESS alone.
+        if side == capturing_side(record) and not hop:
             service_name = value_of(record, 'ecs-service-name')
             if service_name:
-                identifier, kind = service_name, 'ecs_service'
-        interface_type = value_of(record, 'interface-type')
-        if interface_type and side == owner and not hop:
-            kind = interface_type
-        # `instance-tag` only exists for the interface that captured the record;
-        # the other end is named by the address map.
-        from_record = value_of(record, 'instance-tag') if (side == owner and not hop) else None
-        labels = {
-            side + '_id': identifier,
-            side + '_addr': address,
-            side + '_scope': scope,
-            side + '_type': kind,
-            side + '_name': from_record or (names or {}).get(address, ''),
+                name, kind = service_name, 'ecs_service'
+            name = value_of(record, 'instance-tag') or name
+            if not kind:
+                kind = (value_of(record, 'interface-type')
+                        or ('instance' if value_of(record, 'instance-id') else ''))
+        return {
+            side + '_name': name or UNNAMED,
+            side + '_type': kind or 'unknown',
+            side + '_vpc': vpc_label(scope),
         }
-        # By ADDRESS, so it holds on a hop too: the address is the group's
-        # instance whichever interface wrote the record.
-        group = (groups or {}).get(address, '')
-        if group:
-            labels[side + '_group'] = group
-        return labels
 
     # Outside every known CIDR the canvas has no box to draw, so the end collapses.
     # Which of the four it collapses to is read from the record, never guessed.
@@ -695,15 +867,11 @@ def name_endpoint(record, side, cidrs, names=None, hop=False, groups=None):
     else:
         collapsed, kind = 'internet', 'internet'
 
+    # A collapsed end IS its name -- `S3`, `internet`, `on-premises`.
     return {
-        side + '_id': collapsed,
-        side + '_addr': '',
-        side + '_scope': 'external',
-        side + '_type': kind,
-        # A collapsed end IS its name -- `S3`, `internet`, `on-premises`. Saying
-        # so keeps `sum by (src_name, dst_name)` a complete question instead of
-        # one that silently drops every external edge.
         side + '_name': collapsed,
+        side + '_type': kind,
+        side + '_vpc': 'external',
     }
 
 
@@ -792,7 +960,7 @@ def service_port(record):
 
 # --- aggregation ------------------------------------------------------------------
 
-def accumulate(records, cidrs, diagnostics, names=None, groups=None):
+def accumulate(records, cidrs, diagnostics, owners=None):
     """(bucket, labels) -> [bytes, packets], keeping only the egress direction."""
     totals = defaultdict(lambda: [0, 0])
 
@@ -853,8 +1021,8 @@ def accumulate(records, cidrs, diagnostics, names=None, groups=None):
         bucket = (start // BUCKET_SECONDS) * BUCKET_SECONDS
 
         labels = {}
-        labels.update(name_endpoint(record, 'src', cidrs, names, hop, groups))
-        labels.update(name_endpoint(record, 'dst', cidrs, names, hop, groups))
+        labels.update(name_endpoint(record, 'src', cidrs, owners, hop))
+        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop))
         if hop:
             # DECLARED, not left to be inferred from the shape of the other
             # labels. A hop and a direct conversation between the same two boxes
@@ -901,27 +1069,27 @@ def accumulate(records, cidrs, diagnostics, names=None, groups=None):
 
 
 def group_of(labels):
-    """The identity the cut competes on: the name when there is one, else the id."""
+    """The identity the cut competes on: each end's name and the VPC it is in.
+
+    The VPC is part of it only for the ends nothing named: `unnamed` in two VPCs
+    is two different things, while a named end is unique on its own.
+    """
     as_dict = dict(labels)
     return (
-        as_dict.get('src_name') or as_dict.get('src_id') or as_dict.get('src_addr', ''),
-        as_dict.get('dst_name') or as_dict.get('dst_id') or as_dict.get('dst_addr', ''),
+        as_dict.get('src_name', ''), as_dict.get('src_vpc', ''),
+        as_dict.get('dst_name', ''), as_dict.get('dst_vpc', ''),
     )
 
 
 def cut_to_top_n(totals):
     """Top N per bucket, plus one `rest` row so the total still closes.
 
-    IT RANKS GROUPS AND KEEPS MEMBERS, and the difference is the whole reason
-    this is not a plain sort. Fifty instances of one Auto Scaling group are ONE
-    thing that talks, spread over fifty series because each machine has its own
-    id. Ranked separately they divide their own traffic fifty ways and a group
-    that is the busiest thing in the VPC gets pushed out of the cut by resources
-    that move a fraction of what it does -- and the `rest` row hides it, because
-    a total that still closes looks right.
-
-    Ranking by group and then keeping every member of a surviving group gives
-    both readings: sum by name for the group, by id for the machine.
+    IT RANKS PAIRS OF NAMES, and every row of one pair is kept or cut together.
+    A pair can still hold several rows -- one per service port, protocol or door
+    -- and ranked row by row they would divide their own traffic and a pair that
+    is the busiest thing in the VPC could be pushed out by resources that move a
+    fraction of what it does, with the `rest` row hiding it because a total that
+    still closes looks right.
     """
     by_bucket = defaultdict(list)
     for (bucket, labels), values in totals.items():
@@ -945,10 +1113,8 @@ def cut_to_top_n(totals):
         if overflow:
             rest = [sum(v[0] for v in overflow), sum(v[1] for v in overflow)]
             rest_labels = (
-                ('src_id', 'rest'), ('src_addr', ''), ('src_scope', 'aggregate'),
-                ('src_type', 'rest'), ('src_name', 'rest'),
-                ('dst_id', 'rest'), ('dst_addr', ''), ('dst_scope', 'aggregate'),
-                ('dst_type', 'rest'), ('dst_name', 'rest'),
+                ('dst_name', 'rest'), ('dst_type', 'rest'), ('dst_vpc', 'aggregate'),
+                ('src_name', 'rest'), ('src_type', 'rest'), ('src_vpc', 'aggregate'),
             )
             kept[(bucket, rest_labels)] = rest
     return kept
@@ -1136,15 +1302,14 @@ def lambda_handler(event, context):
     offset_ms = write_offset_ms(read_keys)
     print('write offset: ' + str(offset_ms) + ' ms into each bucket')
 
-    # One describe at most, for the addresses this batch mentions and the cache
-    # does not already hold. In the steady state of a warm container that list is
-    # empty and EC2 is not called at all.
-    names = names_for_addresses(addresses_in(records, cidrs))
-    groups = groups_for_addresses()
-    diagnostics['addresses_named'] = len(names)
-    diagnostics['addresses_in_a_group'] = len(groups)
+    # Only for the addresses this batch mentions and the cache does not already
+    # hold. In the steady state of a warm container that list is empty and EC2 is
+    # not called at all.
+    owners = owners_for_addresses(addresses_in(records, cidrs))
+    diagnostics['addresses_named'] = sum(1 for name, _ in owners.values() if name)
+    diagnostics['addresses_unnamed'] = sum(1 for name, _ in owners.values() if not name)
 
-    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, names, groups))
+    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, owners))
     edge_series = to_series(totals, offset_ms)
 
     if not edge_series:

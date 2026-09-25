@@ -196,28 +196,38 @@ LINES = [
 ]
 
 cidrs = [(ipaddress.ip_network('10.0.0.0/16'), 'vpc-1')]
+pfl._vpc_name_by_id['vpc-1'] = 'lab'
+# What `owners_for_addresses` answers for this VPC: the Name tag of what owns each
+# address, and what kind of thing that is.
+OWNERS = {'10.0.1.5': ('web', 'instance'), '10.0.2.9': ('db', 'instance'),
+          '10.0.0.9': ('nat', 'instance')}
 field_map = pfl.field_map_from_header(HEADER)
 records = [{n: line.split()[i] for n, i in field_map.items()} for line in LINES]
 
 diagnostics = defaultdict(int)
-totals = pfl.accumulate(records, cidrs, diagnostics)
+totals = pfl.accumulate(records, cidrs, diagnostics, OWNERS)
 
 destinations = {}
 for (_, label_tuple), values in totals.items():
     as_dict = dict(label_tuple)
-    destinations[as_dict['dst_id'] or as_dict['dst_addr']] = (as_dict['dst_type'], values[0])
+    destinations[as_dict['dst_name']] = (as_dict['dst_type'], as_dict['dst_vpc'], values[0])
 
 check('the ingress copy was deduplicated (four edges, not five)',
       len(totals) == 4, str(len(totals)))
 check('NODATA discarded', diagnostics['records_nodata'] == 1, str(dict(diagnostics)))
-check('an internal destination resolves by CIDR',
-      destinations.get('10.0.2.9', ('', 0))[0] == 'address')
+check('an internal destination is named by what owns its address, in its VPC',
+      destinations.get('db', ('', '', 0))[:2] == ('instance', 'lab'), str(destinations))
 check('public through an internet gateway becomes internet',
-      destinations.get('internet', ('', 0))[0] == 'internet')
+      destinations.get('internet', ('', '', 0))[:2] == ('internet', 'external'))
 check('a named service becomes S3',
-      destinations.get('S3', ('', 0))[0] == 'aws_service')
+      destinations.get('S3', ('', '', 0))[0] == 'aws_service')
 check('10.99 through a VGW becomes on-premises, NOT internet',
-      destinations.get('on-premises', ('', 0))[0] == 'on_premises')
+      destinations.get('on-premises', ('', '', 0))[0] == 'on_premises')
+check('no series carries an id, an address or a VPC id',
+      not any(dict(k[1]).keys() & {'src_id', 'dst_id', 'src_addr', 'dst_addr',
+                                   'src_scope', 'dst_scope', 'src_group', 'dst_group'}
+              for k in totals),
+      str(sorted({key for k in totals for key in dict(k[1])})))
 
 print('\n=== a hop through a middlebox ===')
 # One conversation, as a NAT instance and the sender each write it. Copied from
@@ -235,27 +245,23 @@ HOP_LINES = [
 ]
 hop_records = [{n: line.split()[i] for n, i in field_map.items()} for line in HOP_LINES]
 hop_diagnostics = defaultdict(int)
-hop_totals = pfl.accumulate(hop_records, cidrs, hop_diagnostics)
+hop_totals = pfl.accumulate(hop_records, cidrs, hop_diagnostics, OWNERS)
 
 by_pair = {}
 for (_, label_tuple), values in hop_totals.items():
     as_dict = dict(label_tuple)
-    left = as_dict.get('src_id') or as_dict.get('src_addr')
-    right = as_dict.get('dst_id') or as_dict.get('dst_addr')
-    by_pair[(left, right, as_dict.get('hop', ''))] = (as_dict, values[0])
+    by_pair[(as_dict['src_name'], as_dict['dst_name'], as_dict.get('hop', ''))] = (as_dict, values[0])
 
 check('the outbound hop survives, although its record is an ingress one',
-      ('10.0.1.5', '10.0.0.9', '1') in by_pair, str(sorted(by_pair)))
+      ('web', 'nat', '1') in by_pair, str(sorted(by_pair)))
 check('the return hop is the middlebox talking to the machine, not the internet',
-      ('10.0.0.9', '10.0.1.5', '1') in by_pair, str(sorted(by_pair)))
+      ('nat', 'web', '1') in by_pair, str(sorted(by_pair)))
 check("the sender's own record still reports the CONVERSATION",
-      ('i-0abc', 'internet', '') in by_pair, str(sorted(by_pair)))
+      ('web', 'internet', '') in by_pair, str(sorted(by_pair)))
 # The expensive mistake this forbids: `instance-id` on those two records is the
 # NAT, while the source of the outbound hop is the machine that sent TO it.
 check('neither end of a hop is named by the capturing interface',
-      all(fields.get('src_id', '') == '' and fields.get('dst_id', '') == ''
-          for (_, _, marked), (fields, _) in by_pair.items() if marked == '1'),
-      str([f for (_, _, m), (f, _) in by_pair.items() if m == '1']))
+      ('nat', 'nat', '1') not in by_pair, str(sorted(by_pair)))
 check('a hop carries no egress door',
       all('egress' not in fields
           for (_, _, marked), (fields, _) in by_pair.items() if marked == '1'))
@@ -263,8 +269,8 @@ check('three series: two hops and one conversation, nothing counted twice',
       len(hop_totals) == 3 and hop_diagnostics['records_hop'] == 2,
       str(len(hop_totals)) + ' series, ' + str(dict(hop_diagnostics)))
 check('the hop carries the volume that crossed it',
-      by_pair[('10.0.0.9', '10.0.1.5', '1')][1] == 9000,
-      str(by_pair.get(('10.0.0.9', '10.0.1.5', '1'))))
+      by_pair[('nat', 'web', '1')][1] == 9000,
+      str(by_pair.get(('nat', 'web', '1'))))
 
 print('\n=== the IP protocol reaches the labels ===')
 PROTO_LINES = [
@@ -275,7 +281,7 @@ PROTO_LINES = [
     '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 4444 443 6 10 800 1758549780 1758549840 ACCEPT OK egress 1 - - -',
 ]
 proto_records = [{n: line.split()[i] for n, i in field_map.items()} for line in PROTO_LINES]
-proto_totals = pfl.accumulate(proto_records, cidrs, defaultdict(int))
+proto_totals = pfl.accumulate(proto_records, cidrs, defaultdict(int), OWNERS)
 proto_shares = {(dict(k[1]).get('protocol'), dict(k[1]).get('service_port')) for k in proto_totals}
 
 check('ICMP is labelled 1, and the 0 beside it is not what should name the share',
@@ -295,18 +301,14 @@ OUTSIDE_LINES = [
 ]
 out_records = [{n: line.split()[i] for n, i in field_map.items()} for line in OUTSIDE_LINES]
 out_diagnostics = defaultdict(int)
-out_totals = pfl.accumulate(out_records, cidrs, out_diagnostics)
-out_pairs = {
-    (dict(k[1]).get('src_id') or dict(k[1]).get('src_addr'),
-     dict(k[1]).get('dst_id') or dict(k[1]).get('dst_addr'))
-    for k in out_totals
-}
+out_totals = pfl.accumulate(out_records, cidrs, out_diagnostics, OWNERS)
+out_pairs = {(dict(k[1])['src_name'], dict(k[1])['dst_name']) for k in out_totals}
 
-check('the outbound half is there', ('i-0abc', 'internet') in out_pairs, str(sorted(out_pairs)))
-# The whole point: named by the SAME id as the outbound half. By address the two
-# would be different pairs and the conversation would be drawn as two things.
-check('and the reply, named by the id of the interface that captured IT',
-      ('internet', 'i-0abc') in out_pairs, str(sorted(out_pairs)))
+check('the outbound half is there', ('web', 'internet') in out_pairs, str(sorted(out_pairs)))
+# The whole point: named the SAME way as the outbound half, or the conversation
+# would be drawn as two things.
+check('and the reply, named by the same name as the outbound half',
+      ('internet', 'web') in out_pairs, str(sorted(out_pairs)))
 check('the internal ingress copy is still dropped -- that one IS a duplicate',
       len(out_totals) == 2 and out_diagnostics['records_inbound_kept'] == 1,
       str(len(out_totals)) + ' series, ' + str(dict(out_diagnostics)))
@@ -344,24 +346,22 @@ SERVICE_LINES = [
     '11 vpc-1 sub-1 eni-1 i-0abc 10.0.1.5 10.0.2.9 10.0.1.5 10.0.2.9 50051 40003 6 5 700 1758549780 1758549840 ACCEPT OK egress 1 - - -',
 ]
 service_records = [{n: line.split()[i] for n, i in field_map.items()} for line in SERVICE_LINES]
-service_totals = pfl.accumulate(service_records, cidrs, defaultdict(int))
+service_totals = pfl.accumulate(service_records, cidrs, defaultdict(int), OWNERS)
 service_by_pair = defaultdict(set)
 for (_, label_tuple), values in service_totals.items():
     as_dict = dict(label_tuple)
-    left = as_dict.get('src_id') or as_dict.get('src_addr')
-    right = as_dict.get('dst_id') or as_dict.get('dst_addr')
-    service_by_pair[(left, right)].add(as_dict.get('service_port'))
+    service_by_pair[(as_dict['src_name'], as_dict['dst_name'])].add(as_dict.get('service_port'))
 
 check('the request is named after the port it went to',
-      service_by_pair[('i-0abc', 'internet')] == {'443'}, str(dict(service_by_pair)))
+      service_by_pair[('web', 'internet')] == {'443'}, str(dict(service_by_pair)))
 check('and its reply after the port it came from -- the same service',
-      service_by_pair[('internet', 'i-0abc')] == {'443'}, str(dict(service_by_pair)))
+      service_by_pair[('internet', 'web')] == {'443'}, str(dict(service_by_pair)))
 check('two connections to one service are one series, not one per client port',
       sum(1 for (_, label_tuple) in service_totals
-          if dict(label_tuple).get('src_id') == 'internet') == 1,
+          if dict(label_tuple).get('src_name') == 'internet') == 1,
       str(len(service_totals)) + ' series')
 check('two ephemeral ends collapse to the floor, one value for every connection',
-      service_by_pair[('i-0abc', '10.0.2.9')] == {str(pfl.EPHEMERAL_FLOOR)},
+      service_by_pair[('web', 'db')] == {str(pfl.EPHEMERAL_FLOOR)},
       str(dict(service_by_pair)))
 check('no series carries `dstport` any more',
       not any('dstport' in dict(label_tuple) for (_, label_tuple) in service_totals))
@@ -539,7 +539,7 @@ check('the offset is the same in every process, not Python hash()',
 
 # The measured case, rebuilt: one bucket, one pair, two objects, 2778 and 1401.
 BUCKET = 1790117040
-PAIR = (('src_id', 'i-0abc'), ('dst_id', 'internet'))
+PAIR = (('src_name', 'web'), ('dst_name', 'internet'))
 sample_a = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [2778, 29]}, offset_a)
             if labels['__name__'] == pfl.METRIC_BYTES][0][0]
 sample_b = [s for labels, s in pfl.to_series({(BUCKET, PAIR): [1401, 13]}, offset_b)
@@ -560,6 +560,8 @@ check('with no offset the two would land on the same instant -- the 400',
 print('\n=== the ORIGINAL address, which was never being read ===')
 
 LAB_CIDRS = [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')]
+pfl._vpc_name_by_id['vpc-lab'] = 'lab'
+LAB_OWNERS = {'10.3.0.31': ('web', 'instance'), '10.3.0.200': ('nat', 'nat_gateway')}
 
 # `pkt-srcaddr` carries the address BEFORE an intermediary rewrote it. The code
 # asked for `pkt_srcaddr` -- an underscore, where every flow log field is spelled
@@ -568,49 +570,62 @@ LAB_CIDRS = [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')]
 # sent it, with a number that looks perfectly sane.
 behind_nat = {'srcaddr': '10.3.0.200', 'pkt-srcaddr': '10.3.0.31',
               'dstaddr': '52.1.2.3', 'traffic-path': '2'}
-src = pfl.name_endpoint(behind_nat, 'src', LAB_CIDRS)
+src = pfl.name_endpoint(behind_nat, 'src', LAB_CIDRS, LAB_OWNERS)
 check('the original address wins over the rewritten one',
-      src['src_addr'] == '10.3.0.31', src['src_addr'])
+      src['src_name'] == 'web', src['src_name'])
 check('and the field is spelled the way the header spells it',
       pfl.value_of({'pkt-srcaddr': '10.3.0.31'}, 'pkt-srcaddr') == '10.3.0.31')
 check('while the old spelling finds nothing, which is why it was silent',
       pfl.value_of({'pkt-srcaddr': '10.3.0.31'}, 'pkt_srcaddr') is None)
 
 
-print('\n=== the name, which is what groups siblings ===')
+print('\n=== the name, which is the whole identity of an end ===')
 
 named = pfl.name_endpoint(
     {'srcaddr': '10.3.0.31', 'instance-id': 'i-aaa', 'instance-tag': 'web-fleet'},
     'src', LAB_CIDRS)
 check('the record names itself when the tag travels in it',
       named['src_name'] == 'web-fleet', named['src_name'])
-check('and the id stays per-machine, so both readings survive',
-      named['src_id'] == 'i-aaa', named['src_id'])
+check('and only the name, the kind and the VPC go out -- no id, no address',
+      set(named) == {'src_name', 'src_type', 'src_vpc'}, str(named))
+check('the VPC is named by its Name tag, not by its id',
+      named['src_vpc'] == 'lab', named['src_vpc'])
 
 described = pfl.name_endpoint(
     {'srcaddr': '10.3.0.31', 'instance-id': 'i-aaa'}, 'src', LAB_CIDRS,
-    {'10.3.0.31': 'web-fleet'})
-check('without the tag in the record, the described map names it',
-      described['src_name'] == 'web-fleet', described['src_name'])
+    {'10.3.0.31': ('web-fleet', 'instance')})
+check('without the tag in the record, the owner of the address names it',
+      (described['src_name'], described['src_type']) == ('web-fleet', 'instance'),
+      str(described))
+
+replaced = pfl.name_endpoint(
+    {'srcaddr': '10.3.0.44', 'instance-id': 'i-bbb'}, 'src', LAB_CIDRS,
+    {'10.3.0.44': ('web-fleet', 'instance')})
+check('an instance replaced by another with the same Name gives the SAME labels',
+      replaced == described, str((replaced, described)))
 
 both = pfl.name_endpoint(
     {'srcaddr': '10.3.0.31', 'instance-id': 'i-aaa', 'instance-tag': 'from-record'},
-    'src', LAB_CIDRS, {'10.3.0.31': 'from-describe'})
+    'src', LAB_CIDRS, {'10.3.0.31': ('from-describe', 'instance')})
 check('the record wins over the describe, because it is what AWS stamped',
       both['src_name'] == 'from-record', both['src_name'])
 
 destination = pfl.name_endpoint(
     {'srcaddr': '10.3.0.31', 'dstaddr': '10.3.0.77'}, 'dst', LAB_CIDRS,
-    {'10.3.0.77': 'the-database'})
-check('the far end is named too, and it never carries an instance id',
-      (destination['dst_name'], destination['dst_id']) == ('the-database', ''),
-      str((destination['dst_name'], destination['dst_id'])))
+    {'10.3.0.77': ('the-database', 'rds')})
+check('the far end is named by what owns its address, and says what it is',
+      (destination['dst_name'], destination['dst_type']) == ('the-database', 'rds'),
+      str(destination))
+
+nameless = pfl.name_endpoint({'srcaddr': '10.3.0.31', 'dstaddr': '10.3.0.99'}, 'dst', LAB_CIDRS)
+check('an address nothing named is `unnamed`, in its VPC',
+      (nameless['dst_name'], nameless['dst_vpc']) == ('unnamed', 'lab'), str(nameless))
 
 external = pfl.name_endpoint(
     {'srcaddr': '10.3.0.31', 'dstaddr': '52.1.2.3', 'traffic-path': '2'},
     'dst', LAB_CIDRS)
-check('a collapsed end IS its name, so summing by name keeps external edges',
-      external['dst_name'] == 'internet', external['dst_name'])
+check('a collapsed end IS its name, outside every VPC',
+      (external['dst_name'], external['dst_vpc']) == ('internet', 'external'), str(external))
 
 
 print('\n=== the account, without which two of them share a series ===')
@@ -629,21 +644,21 @@ pfl.ACCOUNT = ACCOUNT_WAS
 print('\n=== the cut ranks GROUPS and keeps MEMBERS ===')
 
 
-def row(src_name, dst_name, member, byte_count):
-    return (BUCKET, (('src_id', member), ('src_name', src_name),
-                     ('dst_id', dst_name), ('dst_name', dst_name))), [byte_count, 1]
+def row(src_name, dst_name, port, byte_count):
+    return (BUCKET, (('src_name', src_name), ('dst_name', dst_name),
+                     ('service_port', port))), [byte_count, 1]
 
 
-# One group of three machines moving 300 between them, against two single
-# resources moving more than any ONE of the three. Ranked row by row the group
-# loses every seat; ranked by group it wins the first.
+# One pair talking over three services, moving 300 in all, against two single
+# pairs moving more than any ONE of the three rows. Ranked row by row the pair
+# loses every seat; ranked by pair it wins the first.
 fleet = dict([
-    row('web-fleet', 'S3', 'i-a', 100),
-    row('web-fleet', 'S3', 'i-b', 100),
-    row('web-fleet', 'S3', 'i-c', 100),
-    row('the-database', 'S3', 'i-db', 250),
-    row('a-cache', 'S3', 'i-cache', 200),
-    row('noise', 'S3', 'i-noise', 10),
+    row('web-fleet', 'S3', '443', 100),
+    row('web-fleet', 'S3', '80', 100),
+    row('web-fleet', 'S3', '8080', 100),
+    row('the-database', 'S3', '443', 250),
+    row('a-cache', 'S3', '443', 200),
+    row('noise', 'S3', '443', 10),
 ])
 
 TOP_WAS = pfl.TOP_N_PAIRS
@@ -655,9 +670,9 @@ survivors = defaultdict(int)
 for (_, labels), values in cut.items():
     survivors[dict(labels)['src_name']] += values[0]
 
-check('the group survives the cut whole: all three members kept',
+check('the pair survives the cut whole: all three rows kept',
       survivors.get('web-fleet') == 300, str(survivors.get('web-fleet')))
-check('the second seat goes to the next group by TOTAL, not by biggest row',
+check('the second seat goes to the next pair by TOTAL, not by biggest row',
       survivors.get('the-database') == 250, str(survivors.get('the-database')))
 check('what lost is summed into `rest`, so the bucket still closes',
       survivors.get('rest') == 210, str(survivors.get('rest')))
@@ -677,22 +692,36 @@ class _FakePaginator:
         return self.pages
 
 
-class _FakeEc2:
+class _FakeClient:
+    # Pages per operation, so one fake answers every describe a batch makes.
     def __init__(self, pages, calls, explode=False):
         self.pages, self.calls, self.explode = pages, calls, explode
 
     def get_paginator(self, operation):
         if self.explode:
-            raise RuntimeError('EC2 said no')
-        return _FakePaginator(self.pages, self.calls, operation)
+            raise RuntimeError('AWS said no')
+        return _FakePaginator(self.pages.get(operation, []), self.calls, operation)
+
+    def describe_tags(self, **kwargs):
+        self.calls.append(('describe_tags', kwargs))
+        if self.explode:
+            raise RuntimeError('AccessDenied')
+        return self.pages['describe_tags']
+
+    def list_tags(self, **kwargs):
+        self.calls.append(('list_tags', kwargs))
+        if self.explode:
+            raise RuntimeError('AccessDenied')
+        return self.pages['list_tags']
 
 
-VPC_PAGE = [{'Vpcs': [{'VpcId': 'vpc-lab',
-                       'CidrBlockAssociationSet': [{'CidrBlock': '10.3.0.0/16'}]}]}]
-EC2_WAS = pfl.ec2
+VPC_PAGE = {'describe_vpcs': [{'Vpcs': [{
+    'VpcId': 'vpc-lab', 'Tags': [{'Key': 'Name', 'Value': 'lab-vpc'}],
+    'CidrBlockAssociationSet': [{'CidrBlock': '10.3.0.0/16'}]}]}]}
+CLIENTS_WERE = (pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client)
 
 calls = []
-pfl.ec2 = _FakeEc2(VPC_PAGE, calls)
+pfl.ec2 = _FakeClient(VPC_PAGE, calls)
 pfl._cidrs_cache['expires_at'] = 0.0
 pfl._cidrs_cache['blocks'] = []
 first = pfl.known_cidrs()
@@ -701,73 +730,110 @@ check('the CIDRs are described once, not once per delivered object',
       len(calls) == 1, str(len(calls)))
 check('and the second call answers from the cache, with the same content',
       first == second)
+check('the same answer names the VPC after its Name tag',
+      pfl.vpc_label('vpc-lab') == 'lab-vpc', pfl.vpc_label('vpc-lab'))
 
 pfl._cidrs_cache['expires_at'] = time.time() - 1
 pfl.known_cidrs()
 check('once the timer runs out it reads again, so a rename is picked up',
       len(calls) == 2, str(len(calls)))
 
-INSTANCE_PAGE = [{'Reservations': [{'Instances': [{
-    'Tags': [{'Key': 'Name', 'Value': 'web-fleet'}],
-    'NetworkInterfaces': [{'PrivateIpAddresses': [
-        {'PrivateIpAddress': '10.3.0.31'}, {'PrivateIpAddress': '10.3.0.32'}]}],
-}]}]}]
+
+def interface(addresses, **fields):
+    out = {'PrivateIpAddresses': [{'PrivateIpAddress': a} for a in addresses],
+           'OwnerId': '123456789012'}
+    out.update(fields)
+    return out
+
+
+# Two instances of one Auto Scaling group, a NAT gateway, a load balancer, a Lambda
+# function, a database and an address nothing owns any more.
+ACCOUNT_PAGES = {
+    'describe_network_interfaces': [{'NetworkInterfaces': [
+        interface(['10.3.0.11'], Attachment={'InstanceId': 'i-asg1'}),
+        interface(['10.3.0.12'], Attachment={'InstanceId': 'i-asg2'}),
+        interface(['10.3.0.20'], InterfaceType='nat_gateway',
+                  Description='Interface for NAT Gateway nat-0a1b2c3d4e5f60718'),
+        interface(['10.3.0.30'], Description='ELB app/front-door/50dc6c495c0c9188'),
+        interface(['10.3.0.40'], InterfaceType='lambda',
+                  Description='AWS Lambda VPC ENI-process-orders-3f1c2b4a-1d2e-4f5a-9b8c-7d6e5f4a3b2c'),
+        interface(['10.3.0.50'], Description='RDSNetworkInterface'),
+    ]}],
+    'describe_instances': [{'Reservations': [{'Instances': [
+        {'InstanceId': 'i-asg1', 'Tags': [{'Key': 'Name', 'Value': 'ASG'}]},
+        {'InstanceId': 'i-asg2', 'Tags': [{'Key': 'Name', 'Value': 'ASG'}]},
+    ]}]}],
+    'describe_nat_gateways': [{'NatGateways': [
+        {'NatGatewayId': 'nat-0a1b2c3d4e5f60718', 'Tags': [{'Key': 'Name', 'Value': 'NAT'}]}]}],
+    'describe_db_instances': [{'DBInstances': [
+        {'DBInstanceIdentifier': 'orders-db', 'Endpoint': {'Address': '10.3.0.50'},
+         'TagList': [{'Key': 'Name', 'Value': 'OrdersDb'}]}]}],
+    'describe_tags': {'TagDescriptions': [{
+        'ResourceArn': 'arn:aws:elasticloadbalancing:' + pfl.REGION
+                       + ':123456789012:loadbalancer/app/front-door/50dc6c495c0c9188',
+        'Tags': [{'Key': 'Name', 'Value': 'FrontDoor'}]}]},
+    'list_tags': {'Tags': {'Name': 'ProcessOrders'}},
+}
+EVERY = {'10.3.0.11', '10.3.0.12', '10.3.0.20', '10.3.0.30', '10.3.0.40', '10.3.0.50', '10.3.0.99'}
 
 calls = []
-pfl.ec2 = _FakeEc2(INSTANCE_PAGE, calls)
-pfl._name_by_address.clear()
-names = pfl.names_for_addresses({'10.3.0.31', '10.3.0.32'})
-check('one call names every address of the batch',
-      len(calls) == 1 and names.get('10.3.0.31') == 'web-fleet', str(names))
-check('and it asks by ADDRESS, not by instance id -- a dead id would fail the call',
-      calls[0][1]['Filters'][0]['Name'] == 'private-ip-address',
-      str(calls[0][1]['Filters'][0]['Name']))
+fake = _FakeClient(ACCOUNT_PAGES, calls)
+pfl.ec2 = pfl.elbv2 = pfl.rds = pfl.lambda_client = fake
+pfl._owner_by_address.clear()
+pfl._rds_cache['expires_at'] = 0.0
+owners = pfl.owners_for_addresses(EVERY)
+check('every instance of a group is named after the group, whatever its id',
+      owners.get('10.3.0.11') == owners.get('10.3.0.12') == ('ASG', 'instance'), str(owners))
+check('a NAT gateway is named by its own Name tag',
+      owners.get('10.3.0.20') == ('NAT', 'nat_gateway'), str(owners.get('10.3.0.20')))
+check('a load balancer by its tag, found from the description of its interface',
+      owners.get('10.3.0.30') == ('FrontDoor', 'load_balancer'), str(owners.get('10.3.0.30')))
+check('a Lambda function by its tag, the uuid after its name left out',
+      owners.get('10.3.0.40') == ('ProcessOrders', 'lambda'), str(owners.get('10.3.0.40')))
+check('a database by its tag, through the address its endpoint resolves to',
+      owners.get('10.3.0.50') == ('OrdersDb', 'rds'), str(owners.get('10.3.0.50')))
+check('an address nothing owns has no name',
+      '10.3.0.99' not in owners, str(owners.get('10.3.0.99')))
+interface_calls = [c for c in calls if c[0] == 'describe_network_interfaces']
+check('one call finds the owner of every address of the batch',
+      len(interface_calls) == 1, str(len(interface_calls)))
+check('and it asks by ADDRESS',
+      interface_calls[0][1]['Filters'][0]['Name'] == 'addresses.private-ip-address',
+      str(interface_calls[0][1]['Filters'][0]['Name']))
+instance_calls = [c for c in calls if c[0] == 'describe_instances']
+check('instances are read by a FILTER on the id: a dead id in a list fails the call',
+      len(instance_calls) == 1 and instance_calls[0][1]['Filters'][0]['Name'] == 'instance-id',
+      str(instance_calls))
 
-pfl.names_for_addresses({'10.3.0.31', '10.3.0.32'})
-check('asking again inside the timer costs nothing', len(calls) == 1, str(len(calls)))
+before = len(calls)
+pfl.owners_for_addresses(EVERY)
+check('asking again inside the timer costs nothing', len(calls) == before, str(len(calls) - before))
 
-pfl.names_for_addresses({'10.3.0.31', '10.3.0.99'})
+pfl.owners_for_addresses(EVERY | {'10.3.0.13'})
+asked = [c for c in calls[before:] if c[0] == 'describe_network_interfaces']
 check('only the address the cache lacks is asked for',
-      calls[1][1]['Filters'][0]['Values'] == ['10.3.0.99'],
-      str(calls[1][1]['Filters'][0]['Values']))
+      len(asked) == 1 and asked[0][1]['Filters'][0]['Values'] == ['10.3.0.13'], str(asked))
 
-pfl.names_for_addresses({'10.3.0.99'})
-check('an address EC2 does not know is remembered as nameless, not re-asked',
-      len(calls) == 2, str(len(calls)))
+# Without permission to read the tags, a load balancer and a function still have
+# the name their interface carries -- which the generator took from the box.
+denied = _FakeClient(ACCOUNT_PAGES, [], explode=True)
+pfl.elbv2 = pfl.lambda_client = denied
+pfl._owner_by_address.clear()
+owners = pfl.owners_for_addresses({'10.3.0.30', '10.3.0.40'})
+check('a load balancer whose tags cannot be read keeps its own name',
+      owners.get('10.3.0.30') == ('front-door', 'load_balancer'), str(owners.get('10.3.0.30')))
+check('and so does a function',
+      owners.get('10.3.0.40') == ('process-orders', 'lambda'), str(owners.get('10.3.0.40')))
 
-calls = []
-pfl._name_by_address.clear()
-pfl.ec2 = _FakeEc2(INSTANCE_PAGE, calls, explode=True)
-check('a failed describe returns no names instead of taking the run down',
-      pfl.names_for_addresses({'10.3.0.31'}) == {})
-pfl.ec2 = _FakeEc2(INSTANCE_PAGE, calls)
+pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [], explode=True)
+pfl._owner_by_address.clear()
+check('a failed describe returns no owners instead of taking the run down',
+      pfl.owners_for_addresses({'10.3.0.11'}) == {})
+pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [])
 check('and it is NOT cached as nameless: a transport failure is not an answer',
-      pfl.names_for_addresses({'10.3.0.31'}).get('10.3.0.31') == 'web-fleet')
+      pfl.owners_for_addresses({'10.3.0.11'}).get('10.3.0.11') == ('ASG', 'instance'))
 
-# Two instances an Auto Scaling group launched, and one it did not. AWS writes
-# `aws:autoscaling:groupName` on the first two; the Name tag is the box's label.
-GROUP_PAGE = [{'Reservations': [{'Instances': [
-    {'Tags': [{'Key': 'Name', 'Value': 'ASG'},
-              {'Key': 'aws:autoscaling:groupName', 'Value': 'ASG'}],
-     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.5.0.11'}]}]},
-    {'Tags': [{'Key': 'Name', 'Value': 'ASG'},
-              {'Key': 'aws:autoscaling:groupName', 'Value': 'ASG'}],
-     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.5.0.12'}]}]},
-    {'Tags': [{'Key': 'Name', 'Value': 'nat'}],
-     'NetworkInterfaces': [{'PrivateIpAddresses': [{'PrivateIpAddress': '10.3.0.10'}]}]},
-]}]}]
-
-calls = []
-pfl._name_by_address.clear()
-pfl.ec2 = _FakeEc2(GROUP_PAGE, calls)
-pfl.names_for_addresses({'10.5.0.11', '10.5.0.12', '10.3.0.10'})
-groups = pfl.groups_for_addresses()
-check('the group comes out of the same describe that names the address',
-      len(calls) == 1 and groups == {'10.5.0.11': 'ASG', '10.5.0.12': 'ASG'}, str(groups))
-check('and an instance no group launched has no entry at all',
-      '10.3.0.10' not in groups, str(groups))
-
-pfl.ec2 = EC2_WAS
+pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client = CLIENTS_WERE
 
 spread = {pfl._expiry() for _ in range(50)}
 check('the timer is jittered, so containers that started together do not all '
@@ -785,8 +851,9 @@ outside = [{'srcaddr': '10.3.0.31', 'dstaddr': '52.1.2.3'},
 worth = pfl.addresses_in(outside, LAB_CIDRS)
 check('the public address is left out: it collapses to one point anyway',
       '52.1.2.3' not in worth, str(sorted(worth)))
-check('and the ORIGINAL destination is the one collected, not the rewritten one',
-      worth == {'10.3.0.31', '10.3.0.77'}, str(sorted(worth)))
+check('and both the original and the rewritten address are collected -- a hop is '
+      'named by the second',
+      worth == {'10.3.0.31', '10.3.0.77', '10.3.0.200'}, str(sorted(worth)))
 
 
 
@@ -839,43 +906,40 @@ check('and it is ABSENT, not empty, when the record cannot say',
       'egress' not in quiet_labels, str(quiet_labels))
 
 
-print('\n=== the Auto Scaling group an end belongs to ===')
+print('\n=== an Auto Scaling group is one end, whichever instances it runs ===')
 
-# An instance of the group pings the NAT instance of the other VPC across a
-# peering, and the NAT answers. Each direction is the egress record of its sender.
+# Two instances of the group ping the NAT instance of the other VPC across a
+# peering; later the group is replaced by a new instance with a new id and a new
+# address. All of them carry the group's Name tag.
 PEERED_CIDRS = [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab'),
                 (ipaddress.ip_network('10.5.0.0/16'), 'vpc-asg')]
-PEER_GROUPS = {'10.5.0.11': 'ASG'}
+pfl._vpc_name_by_id['vpc-asg'] = 'asg-vpc'
+PEER_OWNERS = {'10.5.0.11': ('ASG', 'instance'), '10.5.0.12': ('ASG', 'instance'),
+               '10.5.0.77': ('ASG', 'instance'), '10.3.0.10': ('NAT', 'instance')}
 
 
-def ping_record(src, dst, instance):
+def ping_record(src, dst, instance, start='1790205000'):
     return {'srcaddr': src, 'dstaddr': dst, 'flow-direction': 'egress',
             'traffic-path': '4', 'srcport': '0', 'dstport': '0', 'protocol': '1',
-            'packets': '10', 'bytes': '12280', 'start': '1790205000',
+            'packets': '10', 'bytes': '12280', 'start': start,
             'instance-id': instance}
 
 
 peer_totals = pfl.accumulate([ping_record('10.5.0.11', '10.3.0.10', 'i-asg1'),
-                              ping_record('10.3.0.10', '10.5.0.11', 'i-nat')],
-                             PEERED_CIDRS, defaultdict(int), groups=PEER_GROUPS)
-by_source = {dict(labels)['src_addr']: dict(labels) for (_, labels) in peer_totals}
-out_of_group = by_source.get('10.5.0.11', {})
-into_group = by_source.get('10.3.0.10', {})
-check('the sender launched by a group carries the group',
-      out_of_group.get('src_group') == 'ASG', str(out_of_group))
-check('and so does the far end of the reply, named by address alone',
-      into_group.get('dst_group') == 'ASG', str(into_group))
-check('the end no group launched has no group label, not an empty one',
-      'dst_group' not in out_of_group and 'src_group' not in into_group,
-      str((out_of_group, into_group)))
-check('the per-instance id is still there beside it',
-      out_of_group.get('src_id') == 'i-asg1', str(out_of_group))
+                              ping_record('10.5.0.12', '10.3.0.10', 'i-asg2')],
+                             PEERED_CIDRS, defaultdict(int), PEER_OWNERS)
+check('two instances of the group are ONE series, with both volumes',
+      len(peer_totals) == 1 and list(peer_totals.values())[0][0] == 24560,
+      str(peer_totals))
+group_labels = dict(list(peer_totals.keys())[0][1])
+check('named after the group, in the VPC of the group',
+      (group_labels['src_name'], group_labels['src_vpc']) == ('ASG', 'asg-vpc'), str(group_labels))
 
-without = pfl.accumulate([ping_record('10.5.0.11', '10.3.0.10', 'i-asg1')],
-                         PEERED_CIDRS, defaultdict(int))
-check('with no groups known, the series looks exactly as before',
-      not any(key.endswith('_group') for key in dict(list(without.keys())[0][1])),
-      str(dict(list(without.keys())[0][1])))
+later = pfl.accumulate([ping_record('10.5.0.77', '10.3.0.10', 'i-asg9', start='1790208600')],
+                       PEERED_CIDRS, defaultdict(int), PEER_OWNERS)
+check('the instance launched an hour later, new id and new address, continues the SAME series',
+      list(later.keys())[0][1] == list(peer_totals.keys())[0][1],
+      str((list(later.keys())[0][1], list(peer_totals.keys())[0][1])))
 
 
 print('\n' + ('all checks passed' if not failures else 'FAILED: ' + ', '.join(failures)))

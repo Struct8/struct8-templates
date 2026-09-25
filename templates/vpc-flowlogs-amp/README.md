@@ -40,6 +40,37 @@ the internet without a NAT gateway. It is a **copy** of the one under
 `ec2-nat-private`, not a reference to it: rule 4 of the repository README, because
 a shared path becomes a dependency of published versions that cannot be pinned.
 
+## An end is its Name tag
+
+Each end of a series is identified by the **Name tag of the resource that owns the
+address**, which is the logical name of its box on the diagram. No instance id, no
+address and no VPC id is written: all of them change when a resource is replaced,
+and the box does not. A batch instance terminated and launched again, or an Auto
+Scaling group that scales to zero and back, continues the SAME series.
+
+| Label | Value |
+|---|---|
+| `src_name`, `dst_name` | The owner's Name tag. `S3`, `internet`, `on-premises`, `unmapped-network` for an end outside every VPC. `unnamed` when nothing owning the address carries a Name tag |
+| `src_type`, `dst_type` | What the owner is: `instance`, `nat_gateway`, `vpc_endpoint`, `load_balancer`, `lambda`, `rds`, `ecs_task`/`ecs_service`, or the kind of an outside end |
+| `src_vpc`, `dst_vpc` | The VPC's Name tag, or `external` |
+| `service_port`, `protocol`, `egress`, `hop` | As before: the service, the IP protocol, the door out of the VPC, and whether the record is a hop through a middlebox |
+
+The owner is found from the address: one `ec2:DescribeNetworkInterfaces` says
+whose interface it is, and each kind of owner is asked for its tag. The Lambda's
+role needs these, all read-only:
+
+| Permission | For |
+|---|---|
+| `ec2:DescribeVpcs`, `ec2:DescribeNetworkInterfaces`, `ec2:DescribeInstances` | VPC names, interface owners, instance tags |
+| `ec2:DescribeNatGateways`, `ec2:DescribeVpcEndpoints` | NAT gateway and endpoint tags |
+| `elasticloadbalancing:DescribeTags` | Load balancer tags |
+| `lambda:ListTags` | Function tags |
+| `rds:DescribeDBInstances` | Database tags, matched through the address the endpoint resolves to |
+
+A missing permission does not stop the run. A load balancer or a function then
+falls back to its own name, which the generator took from the box. Any other
+owner is written as `unnamed`, and the Lambda's log says which call failed.
+
 ## How late a record may arrive
 
 AWS splits some capture minutes across two deliveries, and the second part
@@ -88,7 +119,7 @@ names into the Lambda's environment, so nothing here is account-specific.
 | `TOP_N_PAIRS` | `200` | Cardinality ceiling; the rest folds into one row |
 | `DELIVERY_PREFIX` | `AWSLogs/` | Where the flow log writes |
 | `OUTPUT_PREFIX` | `struct8/` | Refused as input, so the Lambda cannot read its own output |
-| `DESCRIBE_TTL_SECONDS` | `600` | How long an address→name answer is cached |
+| `DESCRIBE_TTL_SECONDS` | `600` | How long an address→owner answer is cached |
 | `FALLBACK_FIELD_ORDER` | empty | Field order for an object with no header line |
 
 ## Two things that look like faults and are not
