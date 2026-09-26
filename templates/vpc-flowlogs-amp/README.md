@@ -1,8 +1,9 @@
 # vpc-flowlogs-amp — assets
 
 Source code shipped with the VPC Flow Logs → Managed Prometheus template: the
-aggregator that turns flow log records into Prometheus series, and the two
-bootstrap scripts the lab instances run.
+aggregator that turns flow log records into Prometheus series, the one that copies
+the X-Ray service graph into the same workspace, and the bootstrap scripts the lab
+instances run.
 
 | Template version | Asset version |
 |---|---|
@@ -28,6 +29,13 @@ keeps one capture of every flow, names both ends and the service port, collapses
 everything outside the known CIDRs, accumulates into 60-second buckets and
 remote-writes the result. Remote write is protobuf framed in snappy, encoded
 by hand: **no dependency outside the runtime**, so the directory zips as it is.
+
+`v1/lambda/process-traces/` — the traces aggregator, for the **Traces** layer. A
+schedule runs it once per 5-minute block; it reads the X-Ray service graph of each
+group it is given and writes one sample per edge and per metric into the same
+workspace. See [The traces aggregator](#the-traces-aggregator). The remote write
+code is a copy of the one above, not a shared file: each Lambda directory is zipped
+on its own.
 
 `v1/user_data/FlowLogTrafficGenerator.sh` — an Amazon Linux 2023 `user_data`
 script for the public traffic generator. It installs a systemd unit that curls three
@@ -219,3 +227,115 @@ they were survives in the tooltip.
   route table sending `0.0.0.0/0` to it
 - Flow log on the **VPC**, `traffic_type = ALL`, delivering to S3 in plain text
 - S3 notification on `AWSLogs/` + `.log.gz` invoking the aggregator
+
+## The traces aggregator
+
+`v1/lambda/process-traces/` gives the diagram's **Traces** layer a history. X-Ray
+answers one graph for at most 6 hours and one series for at most 24, and each edge
+takes a call of its own. The layer offers a week, so a schedule copies each block
+into the workspace once, and the layer reads it with PromQL, like the Traffic layer.
+
+### What it writes
+
+For each edge X-Ray reports between two services, once per block:
+
+| Series | From the X-Ray series point |
+|---|---|
+| `struct8_trace_requests` | `TotalCount` |
+| `struct8_trace_errors` | `ErrorStatistics.TotalCount` (4xx). Only when above zero |
+| `struct8_trace_faults` | `FaultStatistics.TotalCount` (5xx). Only when above zero |
+| `struct8_trace_throttles` | `ErrorStatistics.ThrottleCount` (429, also counted in errors). Only when above zero |
+| `struct8_trace_response_seconds_sum`, `_count`, `_bucket{le}` | `TotalResponseTime` and `ResponseTimeHistogram`, on fixed bounds from 5 ms to 10 s so blocks add up. **Left out when no request of the edge carries a time** |
+| `struct8_trace_bucket_seconds` | The block, so the reader steps its queries by it |
+| `struct8_trace_aggregator_<count>_total` | What the run did: groups read and failed, edges read, failed and skipped, series refused |
+
+Each sample sits at the end of its block, which is the instant X-Ray stamps the
+point with.
+
+**A count without a time is not zero milliseconds.** An edge into a resource that
+records no segment of its own comes back with a count and a histogram at `-0.0`
+(measured on API Gateway → a Lambda without active tracing, 2026-09-25). The count
+is written and the time series are not, so nothing downstream can draw "0 ms".
+
+| Label | Value |
+|---|---|
+| `src_name`, `dst_name` | The resource's Name tag, which is its box's name on the diagram. Without one, the resource's own name; for a stage, the stage name |
+| `src_type`, `dst_type` | `lambda`, `api_gateway_stage`, `dynamodb_table`, `sqs_queue`, `sns_topic`, `s3_bucket`, `state_machine`, `client` (the caller from outside), `remote` (a host outside AWS), or the X-Ray type in lower case |
+| `src_arn`, `dst_arn` | The resource's ARN, when the X-Ray name and type spell it out. Left out otherwise |
+| `edge_type` | X-Ray's: `request`, or `link` for an asynchronous edge |
+| `xray_group`, `region`, `account` | Where the edge was read |
+
+The Lambda service handing a request to its own function (`AWS::Lambda` →
+`AWS::Lambda::Function`, one name) is one box, and that edge is not written.
+
+### One run
+
+1. **Which block.** The time in the event, minus `SETTLE_SECONDS`, rounded down to
+   a block boundary. An EventBridge rule puts the time it fired in the event, so a
+   run that starts late, or a retry, still reads the block its firing stands for.
+   Without a time in the event, the clock is used.
+2. **For each group:** `GetServiceGraph` over the block, for which edges exist;
+   `GetTimeSeriesServiceStatistics` per edge, with the block as the period, for the
+   numbers. The graph's own numbers are never used: two adjacent graph windows count
+   the same request in both.
+3. **Names:** the ARN each X-Ray node spells out, and its Name tag through
+   `tag:GetResources`. A stage's ARN needs its API's id, read with `GetRestApis`.
+4. **Write:** the edges, then the run's counts in a request of their own.
+
+A group that fails, in any region, is counted and the others are still read.
+
+### What it needs on the diagram
+
+| Piece | Why |
+|---|---|
+| A Lambda, Python 3.10 or later, handler `ProcessTraces.lambda_handler`, `file_path_` on this folder | The code |
+| A schedule every 5 minutes, `cron(0/5 * * * ? *)` | It fires on the five minutes, two minutes or more away from any block boundary with the default settle. A rate expression fires at whatever second the schedule was created, which may be at a boundary; the run counts `schedule_near_block_edge` when it is |
+| A wire to the workspace | The endpoint, in `AWS_PROMETHEUS_WORKSPACE_ENDPOINT_0` |
+| A timeout of 60 s or more | Each edge is one call. An edge is not started with less than 15 s left |
+
+| Permission | For |
+|---|---|
+| `xray:GetServiceGraph`, `xray:GetTimeSeriesServiceStatistics` | Reading the edges |
+| `tag:GetResources` | The Name tags |
+| `apigateway:GET` on `arn:aws:apigateway:*::/restapis` | The API id behind a stage's name |
+| `aps:RemoteWrite` on the workspace | Writing |
+
+Without the tag or API Gateway permission the run goes on: each end keeps its own
+name, and a stage has no ARN.
+
+### Parameters
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AWS_PROMETHEUS_WORKSPACE_ENDPOINT_0` | from `PROMETHEUS_ENDPOINT` | Workspace remote-write endpoint. Its region, read from the address, is the one requests are signed with |
+| `XRAY_GROUPS` | empty | Groups to read, separated by commas or spaces: `region/group`, or `group` for the function's own region |
+| `AWS_XRAY_GROUP_NAME_<label>` | — | A group in the function's region, the name a wire from the function to the group would write |
+| `BUCKET_SECONDS` | `300` | The block: `300` or `60`, the two periods X-Ray accepts. At `60` the workspace gets five times the samples, and the schedule must fire every minute |
+| `SETTLE_SECONDS` | `120` | How long after a block closes it is read. **Not measured**: it must be longer than the time a block's numbers keep changing |
+| `MAX_EDGES_PER_GROUP` | `300` | Edges read per group and block; the busiest are kept |
+| `NAME_TTL_SECONDS` | `600` | How long a Name tag and an API id are cached |
+| `ACCOUNT` | from the function's ARN | Account id, written as a label and used in the ARNs |
+
+With no group at all, the run reads `Default`: every trace in the function's region.
+
+### By hand
+
+| Event | What the run does |
+|---|---|
+| `{"dry_run": true}` | Reads and prints the series; writes nothing |
+| `{"block_end": "2026-09-26T12:00:00Z", "blocks": 12}` | Reads the 12 blocks ending there, up to the 6 hours one graph call covers. A series with no newer sample takes them; one already written since takes them only within the workspace's 10-minute window for older samples |
+
+`python ProcessTraces.py --profile <profile>` does the same as the dry run with
+local credentials, taking the groups from `XRAY_GROUPS` and the region from
+`AWS_REGION`. AWS does not document whether these two reads are billed as traces
+accessed.
+
+### Not measured yet
+
+- How long a block keeps changing after it closes, which is what `SETTLE_SECONDS`
+  should be.
+- The names X-Ray gives a table, a bucket and a queue called from a function
+  instrumented with ADOT. The ARNs above follow the X-Ray SDK's documented names.
+- Whether a queue → consumer edge comes as `link`, and what its numbers mean.
+- Whether the series call accepts an edge that starts at `client`.
+- Whether the stage ARN written here matches the one the diagram's status carries.
