@@ -43,21 +43,42 @@ TARGET_URL=https://your-service.example.com/ /opt/k6/run.sh
 RPS=200 VUS=100 DURATION=5m TARGET_URL=https://your-service.example.com/ /opt/k6/run.sh
 ```
 
-`TARGET_URL` is **required** — the generator is not wired to any target, so the
-endpoint under test is given per run. That is what lets one generator hit any
-target without a redeploy.
+`TARGET_URL` is the endpoint under test. Set it as a node environment variable
+(for the auto-run) or per run (for the on-demand path).
 
-## Parameters the script reads
+## Two ways to run
+
+**1. On a timer, without an agent (default).** A systemd timer fires the default
+plan **once**, `STARTUP_DELAY` seconds after boot. The delay lets the target come
+up before the load starts. This is what a user gets out of the box — apply the
+template, wait, and the test runs itself. Set `AUTOSTART=off` to disable it and
+keep the generator idle.
+
+**2. On demand, driven by an agent.** Through Struct8 Debug Access, the agent
+runs `/opt/k6/run.sh` with env vars to tailor the plan — change load, duration
+or target per run, and iterate on the results. This is the "agent helps the user
+build a test plan" path: the agent overrides the defaults live.
+
+The two coexist: the timer guarantees a test always runs; the agent turns that
+fixed plan into a tailored one.
+
+## The default plan (three knobs)
+
+The plan is shaped by three node environment variables, so a user sets it from
+the diagram and an agent overrides it per run:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `TARGET_URL` | none (required) | The endpoint under test |
-| `VUS` | `10` | Virtual users (concurrency) |
-| `DURATION` | `30s` | Test length, e.g. `30s`, `2m`, `1h` |
-| `RPS` | unset | Fixed requests/second. When set, k6 holds this arrival rate regardless of latency; when unset, VUs loop as fast as they can |
+| `STARTUP_DELAY` | `360` | Seconds to wait after boot before the auto-run (the timer). Give the target enough time to come up. |
+| `DURATION` | `5m` | Total test time, e.g. `30s`, `5m`, `1h`. |
+| `VUS` | `20` | The load, in virtual users (concurrency). |
+
+Plus: `TARGET_URL` (endpoint), `METHOD` (`GET`/`POST`), `RPS` (optional fixed
+arrival rate — when set, k6 holds it regardless of latency), and `AUTOSTART`
+(`on`/`off`).
 
 Thresholds: p95 latency under 1000 ms and error rate under 1%. k6 exits non-zero
-when a threshold is breached, which the agent reads back through `debug_result`.
+when a threshold is breached, which an agent reads back through `debug_result`.
 
 ## Live web dashboard
 
