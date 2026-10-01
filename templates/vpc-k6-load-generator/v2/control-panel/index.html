@@ -57,6 +57,12 @@
     .errors { background: rgba(248, 81, 73, 0.1); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px;
       margin-bottom: 16px; font-size: 13px; color: #ffc4c0; }
     .errors ul { margin: 4px 0 0; padding-left: 18px; }
+    .alert { border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; display: flex; gap: 10px; align-items: flex-start; }
+    .alert .ico { font-size: 15px; line-height: 1.2; }
+    .alert-warn { background: rgba(210, 153, 34, 0.12); border: 1px solid #d29922; color: #f0c77a; }
+    .alert-bad { background: rgba(248, 81, 73, 0.12); border: 1px solid var(--stop); color: #ffc4c0; }
+    .alert strong { display: block; }
+    .alert .tip { color: var(--muted); margin-top: 2px; }
     .right-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
     .dashboard-frame { width: 100%; height: 460px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
     .placeholder { height: 160px; display: flex; align-items: center; justify-content: center;
@@ -114,6 +120,8 @@
     <section class="card" aria-labelledby="cfg-title">
       <h2 id="cfg-title">Test configuration</h2>
       <div id="errors" class="errors" role="alert" hidden></div>
+
+      <div id="healthAlert" hidden></div>
 
       <form id="form" novalidate>
         <div class="field" id="tokenField" hidden>
@@ -652,6 +660,31 @@
       if (!$("targetUrl").value) $("targetUrl").value = list[0];
     }
 
+    // A run can be "green" (container up, dashboard served) while every request fails on a wrong
+    // port, path or host. health comes from k6's own output; show it the moment it turns bad.
+    function renderHealth(h, isRunning) {
+      const box = $("healthAlert");
+      box.replaceChildren();
+      if (!h || h.total < 1 || h.failRate < 0.5) { box.hidden = true; return; }
+      const bad = h.failRate >= 0.99;
+      box.className = "alert " + (bad ? "alert-bad" : "alert-warn");
+      const ico = document.createElement("span"); ico.className = "ico"; ico.textContent = bad ? "⛔" : "⚠";
+      const txt = document.createElement("div");
+      const pct = Math.round(h.failRate * 100);
+      const head = document.createElement("strong");
+      head.textContent = isRunning
+        ? `${pct}% of requests are failing${bad ? " — nothing is reaching the target" : ""}.`
+        : `Last run: ${pct}% of requests failed (${h.failed} of ${h.total}).`;
+      txt.append(head);
+      const tip = document.createElement("div"); tip.className = "tip";
+      tip.textContent = h.sampleError
+        ? h.sampleError + "  Check the Target URL: host, port and path."
+        : "Check the Target URL: host, port and path (e.g. :8080/loadtest with POST).";
+      txt.append(tip);
+      box.append(ico, txt);
+      box.hidden = false;
+    }
+
     let limitsApplied = false;
     async function refresh() {
       try {
@@ -681,7 +714,11 @@
           els.logs.textContent = s.logs;
           if (atBottom) els.logs.scrollTop = els.logs.scrollHeight;
         }
-        if (!s.running && s.lastRun) els.status.textContent = `Idle (last run exit ${s.lastRun.exitCode})`;
+        renderHealth(s.health, s.running);
+        if (!s.running && s.lastRun) {
+          const failed = s.health && s.health.failRate >= 0.5;
+          els.status.textContent = failed ? "Last run failed" : (s.lastRun.exitCode === 0 ? "Idle (last run ok)" : `Idle (last run exit ${s.lastRun.exitCode})`);
+        }
         if (s.running && mode === "curve" && runStartedAt && !drag) renderCurve();
       } catch (e) {
         els.status.textContent = e.status === 401 ? "Token required" : "Unreachable";
@@ -702,6 +739,7 @@
           method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload),
         });
         if (!ok) { showErrors(data.errors || [data.error || "Unknown error"]); els.start.disabled = false; return; }
+        $("healthAlert").hidden = true;
         els.logs.textContent = "Starting k6…";
         if (mode === "curve") { runStartedAt = Date.now(); runCurveTotal = data.config?.totalSeconds || 0; }
         setRunning(true);

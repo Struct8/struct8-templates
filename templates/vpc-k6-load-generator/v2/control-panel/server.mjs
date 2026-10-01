@@ -187,6 +187,43 @@ async function logs(tail) {
   return `${res.stdout}${res.stderr}`;
 }
 
+// Reads how the run is going out of k6's own output. A test can be green in the panel (container
+// up, dashboard served) while every request fails -- a wrong port, path or host. This turns that
+// into a number the UI can alarm on, live, and a verdict once the run ends.
+//
+//   * Final summary (after the run): `http_req_failed......: 100.00% 31359 out of 31359`.
+//   * During the run: k6 logs one `level=warning msg="Request Failed" error="..."` per failure,
+//     and the periodic `running (..), N/M VUs, X complete and Y interrupted iterations` line. A
+//     burst of warnings with almost no completed iterations is a run hitting nothing.
+function health(logText) {
+  const summary = /http_req_failed[.\s]*:\s*([\d.]+)%\s*(\d+)\s*out of\s*(\d+)/.exec(logText);
+  if (summary) {
+    const failRate = Number(summary[1]) / 100;
+    return { failRate, failed: Number(summary[2]), total: Number(summary[3]), sampleError: firstError(logText), source: "summary" };
+  }
+  // No summary yet: estimate from the warnings in the tail we hold.
+  const warnings = (logText.match(/level=warning msg="Request Failed"/g) || []).length;
+  if (warnings === 0) return null;
+  const prog = [...logText.matchAll(/running \([^)]*\),\s*[\d/]+ VUs,\s*(\d+)\s+complete/g)];
+  const complete = prog.length ? Number(prog[prog.length - 1][1]) : 0;
+  // Compare failures seen against work actually finished. Clamped to 1; it is a signal, not an exact rate.
+  const failRate = complete + warnings === 0 ? 0 : Math.min(1, warnings / (complete + warnings));
+  return { failRate, failed: warnings, total: complete + warnings, sampleError: firstError(logText), source: "live" };
+}
+
+function firstError(logText) {
+  const m = /msg="Request Failed"\s+error="(.+)"/.exec(logText);
+  if (!m) return null;
+  // Classify on the whole error line, not a prefix: k6 embeds the URL in escaped quotes
+  // (error="Get \"http://..\": lookup .. no such host"), so slicing at the first quote loses the cause.
+  const err = m[1].replace(/\\"/g, '"');
+  if (/no such host|lookup .* on .*:53/.test(err)) return "DNS does not resolve the host in the URL — check the hostname.";
+  if (/connection refused/.test(err)) return "Connection refused — the host is up but nothing listens on that port.";
+  if (/i\/o timeout|context deadline exceeded/.test(err)) return "Connection timed out — wrong port, or a security group is blocking it.";
+  if (/tls|x509|certificate/i.test(err)) return "TLS error — try http:// instead of https://, or check the certificate.";
+  return err.length > 160 ? err.slice(0, 160) + "…" : err;
+}
+
 function prepareReportDir() {
   // The grafana/k6 container runs as a non-root uid; the HTML export fails unless the mounted
   // directory is world-writable.
@@ -282,9 +319,11 @@ async function route(req, res) {
 
   if (req.method === "GET" && path === "/api/status") {
     const s = await status();
+    const logText = s.running || s.lastRun ? await logs(300) : "";
     send(res, 200, {
       ...s,
-      logs: s.running || s.lastRun ? await logs(150) : "",
+      logs: logText.length > 20000 ? logText.slice(-20000) : logText,
+      health: logText ? health(logText) : null,
       dashboardPort: DASHBOARD_PORT,
       platform: readTrimmed(PLATFORM_FILE),
       suggestedTargets: suggestedTargets(),

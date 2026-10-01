@@ -117,6 +117,14 @@ START_VUS=0 STAGES='[{"target":50,"duration":"1m"},{"target":50,"duration":"3m"}
 
 When `STAGES` is set it takes precedence over `VUS`, `DURATION` and `RPS`.
 
+**Failing-request alert.** A run can look fine — container up, dashboard served —
+while every request fails on a wrong port, path or host, which leaves the target's
+own metrics flat. The panel reads the failure rate from k6's output and, once it
+passes 50%, shows an alert naming the likely cause (DNS, connection refused,
+timeout, TLS) while the run is still going; when the run ends with a high failure
+rate it is marked **Last run failed** rather than a bare exit code. It only alerts;
+it does not stop the run, since some failures can be expected.
+
 When a load balancer is wired from the generator, its DNS name
 (`AWS_LB_DNSNAME_*`) is offered in the form as a ready-made target.
 
