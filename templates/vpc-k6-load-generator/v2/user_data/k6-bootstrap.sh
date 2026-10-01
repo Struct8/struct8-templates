@@ -224,7 +224,18 @@ case "$(echo "${K6_PANEL:-off}" | tr '[:upper:]' '[:lower:]')" in
   on|true|1|yes)
     PANEL_SRC="https://raw.githubusercontent.com/Struct8/struct8-templates/${K6_PANEL_REF:-main}/templates/vpc-k6-load-generator/v2/control-panel"
     echo "Installing the k6 control panel from ${PANEL_SRC}..."
+    # `dnf install nodejs` peaks well over what a 512 MB nano has free with Docker already running,
+    # and the kernel OOM-kills dnf mid-install -- intermittently, since it depends on what else is
+    # resident at that instant, which is why the panel came up on some nano boots and not others.
+    # A temporary swapfile gives dnf the headroom to finish. It is removed afterwards so nothing
+    # lingers; on an instance with plenty of RAM the swap simply goes unused.
+    if ! swapon --show | grep -q /swapfile; then
+      echo "Adding a temporary 1G swapfile so dnf is not OOM-killed on a small instance..."
+      fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024
+      chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+    fi
     dnf install -y nodejs
+    swapoff /swapfile 2>/dev/null && rm -f /swapfile
     mkdir -p /opt/k6/panel /opt/k6/report && chmod 777 /opt/k6/report
     PANEL_OK=1
     for f in server.mjs index.html; do
