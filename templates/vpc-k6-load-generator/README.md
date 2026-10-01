@@ -5,6 +5,7 @@ Source code shipped with the self-contained k6 load-generator template.
 | Template version | Asset version |
 |---|---|
 | v1 | `v1/` |
+| v2 | `v2/` — v1 plus the optional web control panel, and the live dashboard started once instead of twice |
 
 ## What the template is
 
@@ -72,12 +73,52 @@ a NAT instance doing a port-forward (`FORWARD_PORT=5665`, `FORWARD_TARGET=<gener
 IP>`): browse `http://<NAT public IP>:5665`. That exposure is for a disposable test
 environment — the dashboard has no auth, so do not leave it open on a long-lived setup.
 
+## Web control panel (optional, v2)
+
+`v2/control-panel/` is a small web UI for people who would rather not drive k6
+through Debug Access: a form for the target, VUs, duration, rate, method and body,
+Start/Stop buttons, the run output, the live dashboard embedded while a run is
+going, and a link to the last run's HTML report. It is one Node file plus one
+HTML page, with no npm dependencies.
+
+It needs the v2 bootstrap: point the EC2's `user_data_file_path_` at
+`templates/vpc-k6-load-generator/v2/user_data/k6-bootstrap.sh`.
+
+It is **off by default**. Set `K6_PANEL=on` on the generator EC2 and the
+bootstrap installs Node, downloads the two files from this folder in the public
+repo, and runs the panel on port 80 as the systemd unit `struct8-k6-panel`. The
+files are fetched instead of inlined because EC2 caps `user_data` at 16 KB.
+
+Under the hood it does what `/opt/k6/run.sh` does: Start is a `docker run` of
+`grafana/k6` with the same test script and the form values as `-e` flags; Stop
+is a `docker stop`. A run started from the panel and one started through Debug
+Access are the same test.
+
+When a load balancer is wired from the generator, its DNS name
+(`AWS_LB_DNSNAME_*`) is offered in the form as a ready-made target.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `K6_PANEL` | `off` | `on` installs and starts the panel |
+| `K6_PANEL_REF` | `main` | Branch, tag or commit the panel files are fetched from |
+| `K6_PANEL_TOKEN` | unset | When set, the panel asks for this token before any action |
+| `K6_PANEL_MAX_VUS` | `500` | Highest VU count a run may request |
+| `K6_PANEL_MAX_DURATION` | `3600` | Longest run, in seconds |
+
+**Exposure.** The panel needs ingress on port 80, and the embedded dashboard
+needs 5665, on the generator's security group. This template is a short-lived
+teaching lab whose users' IPs are not known in advance, so `0.0.0.0/0` on those
+two ports is the expected setup. Anyone who reaches port 80 can fire load from
+this instance at any URL, so set `K6_PANEL_TOKEN` when you can, keep the caps
+low, and destroy the environment when the class is over.
+
 ## Network shape
 
 - VPC `10.60.0.0/16`, one public subnet `10.60.1.0/24`
 - Internet Gateway + public route table (`0.0.0.0/0` → IGW)
 - EC2 with a public IP, an IAM role for SSM, security group egress-only (it is a
-  client; it listens on nothing)
+  client; it listens on nothing). With the control panel on, add ingress on 80
+  (panel) and 5665 (live dashboard).
 
 To test a target in another VPC, either give its public endpoint as `TARGET_URL`,
 or peer this VPC with the target's and pass the target's private DNS name.
