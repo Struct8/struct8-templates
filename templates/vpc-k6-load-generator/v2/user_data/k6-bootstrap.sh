@@ -74,10 +74,32 @@ const BODY = __ENV.BODY || '';
 // rate regardless of latency, which is the honest way to measure a system
 // under a known load. When it is unset the VUs loop as fast as they can.
 const RPS = __ENV.RPS ? parseInt(__ENV.RPS, 10) : 0;
+// Optional load curve. STAGES is a JSON list of {"target": VUs, "duration": "30s"}
+// and START_VUS the VUs at t=0: k6 ramps linearly from one target to the next.
+// When STAGES is set it wins over VUS/DURATION/RPS. The control panel's curve
+// editor writes these two; an agent can set them too:
+//   STAGES='[{"target":50,"duration":"1m"},{"target":0,"duration":"30s"}]' /opt/k6/run.sh
+const STAGES = __ENV.STAGES ? JSON.parse(__ENV.STAGES) : null;
+const START_VUS = parseInt(__ENV.START_VUS || '0', 10);
 
 const errorRate = new Rate('failed_requests');
 
-export const options = RPS > 0
+export const options = STAGES
+  ? {
+      scenarios: {
+        curve: {
+          executor: 'ramping-vus',
+          startVUs: START_VUS,
+          stages: STAGES,
+          gracefulRampDown: '10s',
+        },
+      },
+      thresholds: {
+        http_req_duration: ['p(95)<1000'],
+        failed_requests: ['rate<0.01'],
+      },
+    }
+  : RPS > 0
   ? {
       scenarios: {
         constant_rate: {
@@ -168,6 +190,8 @@ exec docker run --rm -i \
   ${RPS:+-e RPS="${RPS}"} \
   -e METHOD="${METHOD:-GET}" \
   ${BODY:+-e BODY="${BODY}"} \
+  ${STAGES:+-e STAGES="${STAGES}"} \
+  ${START_VUS:+-e START_VUS="${START_VUS}"} \
   -e K6_WEB_DASHBOARD=true \
   -e K6_WEB_DASHBOARD_HOST=0.0.0.0 \
   -e K6_WEB_DASHBOARD_PORT="${DASHBOARD_PORT}" \

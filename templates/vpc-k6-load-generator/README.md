@@ -56,6 +56,8 @@ target without a redeploy.
 | `VUS` | `10` | Virtual users (concurrency) |
 | `DURATION` | `30s` | Test length, e.g. `30s`, `2m`, `1h` |
 | `RPS` | unset | Fixed requests/second. When set, k6 holds this arrival rate regardless of latency; when unset, VUs loop as fast as they can |
+| `STAGES` | unset | v2 only. JSON list of `{"target": VUs, "duration": "30s"}`; switches to the `ramping-vus` executor and wins over `VUS`/`DURATION`/`RPS` |
+| `START_VUS` | `0` | v2 only. VUs at t=0 when `STAGES` is set |
 
 Thresholds: p95 latency under 1000 ms and error rate under 1%. k6 exits non-zero
 when a threshold is breached, which the agent reads back through `debug_result`.
@@ -93,6 +95,27 @@ Under the hood it does what `/opt/k6/run.sh` does: Start is a `docker run` of
 `grafana/k6` with the same test script and the form values as `-e` flags; Stop
 is a `docker stop`. A run started from the panel and one started through Debug
 Access are the same test.
+
+Two load modes, switched at the top of the panel:
+
+- **Constant** — a fixed number of VUs for a duration, optionally held at a fixed
+  request rate.
+- **Curve** — draw the load over time. Click the chart to add a point, drag a
+  point to move it, double-click to remove it; with a point focused, the arrow
+  keys move it. A table beside the chart shows the same points and can be edited
+  directly. Presets give a ramp, a spike, steps or a soak to start from. Each
+  point is "this many VUs at this moment"; k6 ramps in a straight line between
+  them (`ramping-vus` executor). Up to 50 points.
+
+The curve reaches k6 as two variables the test script reads, so an agent can use
+it through Debug Access too:
+
+```bash
+START_VUS=0 STAGES='[{"target":50,"duration":"1m"},{"target":50,"duration":"3m"},{"target":0,"duration":"30s"}]' \
+  TARGET_URL=https://your-service.example.com/ /opt/k6/run.sh
+```
+
+When `STAGES` is set it takes precedence over `VUS`, `DURATION` and `RPS`.
 
 When a load balancer is wired from the generator, its DNS name
 (`AWS_LB_DNSNAME_*`) is offered in the form as a ready-made target.

@@ -107,6 +107,18 @@ function validate(input) {
     errors.push("Target URL is missing or not a valid URL.");
   }
 
+  const method = String(input.method ?? "GET").trim().toUpperCase();
+  if (!METHODS.has(method)) errors.push(`Method must be one of ${[...METHODS].join(", ")}.`);
+
+  const body = String(input.body ?? "");
+  if (body.length > 10000) errors.push("Body is limited to 10000 characters.");
+
+  const common = { targetUrl, method, body };
+  if (input.mode === "curve") {
+    const curve = validateCurve(input.points, errors);
+    return { errors, config: { ...common, mode: "curve", ...curve } };
+  }
+
   const vus = Number(input.vus);
   if (!Number.isInteger(vus) || vus < 1 || vus > MAX_VUS) errors.push(`VUs must be a whole number from 1 to ${MAX_VUS}.`);
 
@@ -119,13 +131,42 @@ function validate(input) {
   const rps = rpsText === "" ? 0 : Number(rpsText);
   if (rpsText !== "" && (!Number.isInteger(rps) || rps < 1 || rps > 100000)) errors.push("Rate, when set, must be a whole number from 1 to 100000.");
 
-  const method = String(input.method ?? "GET").trim().toUpperCase();
-  if (!METHODS.has(method)) errors.push(`Method must be one of ${[...METHODS].join(", ")}.`);
+  return { errors, config: { ...common, mode: "constant", vus, duration, rps } };
+}
 
-  const body = String(input.body ?? "");
-  if (body.length > 10000) errors.push("Body is limited to 10000 characters.");
+// Curve mode. The editor sends points in ABSOLUTE time -- {t: seconds since start, vus} -- which
+// is what a person draws. k6's ramping-vus wants the opposite shape: a start level and a list of
+// stages, each "reach this target over this long". The conversion happens here, after validation,
+// so the browser can never hand k6 a stage list the panel did not check.
+const MAX_POINTS = 50;
 
-  return { errors, config: { targetUrl, vus, duration, rps, method, body } };
+function validateCurve(raw, errors) {
+  if (!Array.isArray(raw) || raw.length < 2) {
+    errors.push("A curve needs at least two points.");
+    return { points: [], stages: [], startVus: 0, totalSeconds: 0, peakVus: 0 };
+  }
+  if (raw.length > MAX_POINTS) errors.push(`A curve is limited to ${MAX_POINTS} points.`);
+
+  const points = raw.map((p) => ({ t: Number(p?.t), vus: Number(p?.vus) }));
+  points.forEach((p, i) => {
+    if (!Number.isInteger(p.t) || p.t < 0) errors.push(`Point ${i + 1}: time must be a whole number of seconds.`);
+    if (!Number.isInteger(p.vus) || p.vus < 0 || p.vus > MAX_VUS) errors.push(`Point ${i + 1}: VUs must be a whole number from 0 to ${MAX_VUS}.`);
+  });
+  if (points[0].t !== 0) errors.push("The first point must be at time 0.");
+  for (let i = 1; i < points.length; i++) {
+    if (points[i].t <= points[i - 1].t) {
+      errors.push(`Point ${i + 1} must come later than point ${i}.`);
+      break;
+    }
+  }
+
+  const totalSeconds = points[points.length - 1].t;
+  if (totalSeconds > MAX_DURATION_S) errors.push(`The curve is capped at ${MAX_DURATION_S} seconds on this panel.`);
+  const peakVus = Math.max(...points.map((p) => p.vus));
+  if (peakVus < 1) errors.push("The curve never goes above 0 VUs, so nothing would run.");
+
+  const stages = points.slice(1).map((p, i) => ({ target: p.vus, duration: `${p.t - points[i].t}s` }));
+  return { points, stages, startVus: points[0].vus, totalSeconds, peakVus };
 }
 
 // --- k6 lifecycle -------------------------------------------------------------------------------
@@ -164,11 +205,15 @@ async function start(cfg) {
   args.push(
     "-p", `${DASHBOARD_PORT}:${DASHBOARD_PORT}`,
     "-e", `TARGET_URL=${cfg.targetUrl}`,
-    "-e", `VUS=${cfg.vus}`,
-    "-e", `DURATION=${cfg.duration}`,
     "-e", `METHOD=${cfg.method}`,
   );
-  if (cfg.rps > 0) args.push("-e", `RPS=${cfg.rps}`);
+  if (cfg.mode === "curve") {
+    // The test script switches to the ramping-vus executor when STAGES is present.
+    args.push("-e", `STAGES=${JSON.stringify(cfg.stages)}`, "-e", `START_VUS=${cfg.startVus}`);
+  } else {
+    args.push("-e", `VUS=${cfg.vus}`, "-e", `DURATION=${cfg.duration}`);
+    if (cfg.rps > 0) args.push("-e", `RPS=${cfg.rps}`);
+  }
   if (cfg.body) args.push("-e", `BODY=${cfg.body}`);
   args.push(
     "-e", "K6_WEB_DASHBOARD=true",
@@ -243,7 +288,7 @@ async function route(req, res) {
       dashboardPort: DASHBOARD_PORT,
       platform: readTrimmed(PLATFORM_FILE),
       suggestedTargets: suggestedTargets(),
-      limits: { maxVus: MAX_VUS, maxDurationSeconds: MAX_DURATION_S },
+      limits: { maxVus: MAX_VUS, maxDurationSeconds: MAX_DURATION_S, maxPoints: MAX_POINTS },
       reportAvailable: existsSync(join(REPORT_DIR, "index.html")),
     });
     return;
