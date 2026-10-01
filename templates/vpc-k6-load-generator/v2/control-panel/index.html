@@ -134,6 +134,7 @@
           <label for="targetUrl">Target URL</label>
           <input id="targetUrl" type="url" placeholder="http://my-service.example.com/" required aria-describedby="targetHint" />
           <div class="hint" id="targetHint">For the Struct8 Hub CPU burner use <code>…:8080/loadtest?ms=80</code> with POST.</div>
+          <div class="hint" id="methodNote" style="color:var(--accent)" hidden>A <code>/loadtest</code> URL only answers POST — method set to POST.</div>
           <div id="suggestions"></div>
         </div>
 
@@ -673,7 +674,7 @@
       const pct = Math.round(h.failRate * 100);
       const head = document.createElement("strong");
       head.textContent = isRunning
-        ? `${pct}% of requests are failing${bad ? " — nothing is reaching the target" : ""}.`
+        ? (bad ? "No responses yet — every request is failing." : `${pct}% of requests are failing.`)
         : `Last run: ${pct}% of requests failed (${h.failed} of ${h.total}).`;
       txt.append(head);
       const tip = document.createElement("div"); tip.className = "tip";
@@ -730,7 +731,10 @@
       showErrors([]);
       sessionStorage.setItem("k6PanelToken", els.token.value);
       els.start.disabled = true;
-      const common = { targetUrl: $("targetUrl").value, method: $("method").value, body: $("body").value };
+      // A /loadtest endpoint only answers POST; force it so a stale GET cannot sink the run.
+      const targetUrl = $("targetUrl").value;
+      const method = /\/loadtest(\b|\?|$)/.test(targetUrl) ? "POST" : $("method").value;
+      const common = { targetUrl, method, body: $("body").value };
       const payload = mode === "curve"
         ? { ...common, mode: "curve", points: points.map((p) => ({ t: p.t, vus: p.vus })) }
         : { ...common, mode: "constant", vus: Number($("vus").value), duration: $("duration").value, rps: $("rps").value };
@@ -743,6 +747,10 @@
         els.logs.textContent = "Starting k6…";
         if (mode === "curve") { runStartedAt = Date.now(); runCurveTotal = data.config?.totalSeconds || 0; }
         setRunning(true);
+        // Check in early instead of waiting out the 3s poll: a wrong target fails from the first
+        // request, and the point is to say so in seconds, not at the end of the run.
+        setTimeout(refresh, 1500);
+        setTimeout(refresh, 4000);
       } catch (e) {
         showErrors([e.status === 401 ? "Enter the access token and try again." : "Network error: " + e.message]);
         els.start.disabled = false;
@@ -755,8 +763,24 @@
       refresh();
     });
 
+    // A /loadtest URL only answers POST (a GET there is 405, so every request fails). Pick POST
+    // for the person and say so, instead of letting a left-over GET turn the whole run red.
+    function syncMethodToTarget() {
+      const isLoadtest = /\/loadtest(\b|\?|$)/.test($("targetUrl").value);
+      const note = $("methodNote");
+      if (isLoadtest && $("method").value !== "POST") {
+        $("method").value = "POST";
+        note.hidden = false;
+      } else if (!isLoadtest) {
+        note.hidden = true;
+      }
+    }
+    $("targetUrl").addEventListener("input", syncMethodToTarget);
+    $("method").addEventListener("change", () => { if (/\/loadtest(\b|\?|$)/.test($("targetUrl").value) && $("method").value === "POST") $("methodNote").hidden = false; });
+
     preset("ramp");
     applyMode();
+    syncMethodToTarget();
     refresh();
     setInterval(refresh, 3000);
   </script>

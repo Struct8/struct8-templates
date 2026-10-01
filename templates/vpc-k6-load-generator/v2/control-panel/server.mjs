@@ -201,14 +201,30 @@ function health(logText) {
     const failRate = Number(summary[1]) / 100;
     return { failRate, failed: Number(summary[2]), total: Number(summary[3]), sampleError: firstError(logText), source: "summary" };
   }
-  // No summary yet: estimate from the warnings in the tail we hold.
+
+  // No final summary yet -- judge the run as it goes. k6 DOES log a `Request Failed` warning per
+  // failure in real time (confirmed: they are in `docker logs` seconds into a run), so a failing
+  // target is visible almost immediately rather than only at the end.
   const warnings = (logText.match(/level=warning msg="Request Failed"/g) || []).length;
   if (warnings === 0) return null;
+
+  // The subtlety: k6 counts a connection-refused request as a COMPLETED iteration (the iteration
+  // ran, its check failed), so `complete` climbs alongside the warnings and warnings/(complete+
+  // warnings) sits near 0.5 even when nothing is actually being answered. That diluted the signal
+  // and kept the alert below its threshold. So the live rate is warnings against the SUCCESSFUL
+  // checks instead -- a run where everything fails has many warnings and ~zero passing checks.
+  const checks = /✓|✗|checks[.\s]*:\s*([\d.]+)%/.exec(logText);
+  const passPct = checks && checks[1] !== undefined ? Number(checks[1]) : null;
   const prog = [...logText.matchAll(/running \([^)]*\),\s*[\d/]+ VUs,\s*(\d+)\s+complete/g)];
   const complete = prog.length ? Number(prog[prog.length - 1][1]) : 0;
-  // Compare failures seen against work actually finished. Clamped to 1; it is a signal, not an exact rate.
-  const failRate = complete + warnings === 0 ? 0 : Math.min(1, warnings / (complete + warnings));
-  return { failRate, failed: warnings, total: complete + warnings, sampleError: firstError(logText), source: "live" };
+
+  // Passing checks is the count of requests that actually got a 2xx/3xx. When the summary's
+  // percentage is not out yet, approximate it: completed iterations minus the failures seen.
+  const passed = passPct !== null ? Math.round((complete * passPct) / 100) : Math.max(0, complete - warnings);
+  const total = passed + warnings;
+  const failRate = total === 0 ? 1 : warnings / total;
+
+  return { failRate, failed: warnings, total, sampleError: firstError(logText), source: "live" };
 }
 
 function firstError(logText) {
