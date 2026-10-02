@@ -69,12 +69,36 @@ function readTrimmed(path) {
   }
 }
 
-// The generator writes one variable per wire leaving this instance, e.g. AWS_LB_DNSNAME_0 for a
-// wired load balancer. Those are offered in the form as ready-made targets.
+// Targets offered in the form as ready-made chips, best first.
+//
+// Two sources, in order:
+//   1. TARGET_URL -- a full URL set on the node environment. This is the way to pre-fill the
+//      target when the generator is NOT wired to its target: the node declares TARGET_URL (often
+//      a Terraform interpolation, e.g. "http://${aws_lb.my-alb.dns_name}/loadtest?ms=80"), and the
+//      panel offers it as the first suggestion and pre-fills the field with it. It is a whole URL,
+//      used verbatim, so it can carry a path and a query (…/loadtest?ms=80), unlike a wire.
+//   2. AWS_LB_DNSNAME_* -- one variable per wire leaving this instance (a wired load balancer),
+//      written by the generator. Each becomes http://<dns>/.
+//
+// The list is de-duplicated, keeping the first occurrence, so a TARGET_URL that happens to match a
+// wired LB is not offered twice.
 function suggestedTargets() {
-  return Object.entries(env)
-    .filter(([k, v]) => /^AWS_LB_DNSNAME_/.test(k) && v)
-    .map(([, v]) => `http://${v}/`);
+  const out = [];
+  const targetUrl = String(env.TARGET_URL ?? "").trim();
+  if (targetUrl && isHttpUrl(targetUrl)) out.push(targetUrl);
+  for (const [k, v] of Object.entries(env)) {
+    if (/^AWS_LB_DNSNAME_/.test(k) && v) out.push(`http://${v}/`);
+  }
+  return [...new Set(out)];
+}
+
+function isHttpUrl(text) {
+  try {
+    const u = new URL(text);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 // "1h30m10s" -> seconds. Returns NaN when the string is not a k6 duration.

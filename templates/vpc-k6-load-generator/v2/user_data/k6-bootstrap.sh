@@ -215,6 +215,11 @@ chmod +x /opt/k6/run.sh
 # K6_PANEL_MAX_VUS and K6_PANEL_MAX_DURATION from the node environment; see the
 # template README before opening port 80.
 #
+# TARGET_URL (optional): if the node sets it, the panel pre-fills the Target URL
+# field with it and offers it as the first suggestion -- handy when the generator
+# is not wired to its target and the URL comes from a Terraform interpolation,
+# e.g. TARGET_URL="http://${aws_lb.my-alb.dns_name}/loadtest?ms=80".
+#
 # Only the two switches are read here, in a subshell with tracing off, so the
 # rest of the node environment (a token, say) never lands in this log.
 panel_var() { ( set +x; [ -f /etc/struct8_env ] && . /etc/struct8_env; eval "printf '%s' \"\${$1:-}\"" ); }

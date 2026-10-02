@@ -650,7 +650,7 @@
       suggestionsShown = true;
       const box = $("suggestions");
       const hint = document.createElement("div");
-      hint.className = "hint"; hint.textContent = "Wired to this instance:";
+      hint.className = "hint"; hint.textContent = "Suggested targets (from TARGET_URL or a wired load balancer):";
       box.append(hint);
       for (const url of list) {
         const b = document.createElement("button");
