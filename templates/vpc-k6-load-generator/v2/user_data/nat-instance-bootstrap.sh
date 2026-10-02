@@ -11,12 +11,22 @@
 # any more -- it has to be set up by hand, which is all this script does: turn on IPv4 forwarding
 # and masquerade everything leaving the primary interface.
 #
-# ORDER MATTERS -- this bit the lab once. On AL2023 iptables is the nft backend, and installing
-# iptables-services pulls in and switches that backend. Rules added BEFORE the package is installed
-# are lost when the install swaps the backend, so the box logs "NAT is up" while POSTROUTING is in
-# fact empty and nothing routes. So the package goes in FIRST, the service is started, and only then
-# are the rules added and saved. The script verifies the MASQUERADE rule is really present at the
-# end and fails loudly if it is not, instead of reporting a success it did not achieve.
+# TWO THINGS BIT THIS LAB, both fixed here:
+#
+# 1) BACKEND SWAP. On AL2023 iptables is the nft backend, and installing iptables-services pulls in
+#    and switches that backend. Rules added BEFORE the package is installed are lost when the
+#    install swaps the backend, so the box logged "NAT is up" while POSTROUTING was empty. Fix: the
+#    package goes in FIRST, the service is started, and only then are the rules added and saved.
+#
+# 2) FORWARD ORDER. The AL2023 default firewall ships a `-A FORWARD -j REJECT` rule. iptables
+#    evaluates FORWARD top to bottom and the first match wins, so ACCEPT rules APPENDED (-A) after
+#    that REJECT never run -- every forwarded packet is rejected and nothing routes, even with
+#    ip_forward on and MASQUERADE in place. Fix: the FORWARD ACCEPT rules are INSERTED at the top
+#    (-I FORWARD 1), ahead of the REJECT. This is the difference between "NAT is up" and NAT that
+#    actually forwards.
+#
+# The script verifies BOTH the MASQUERADE rule and that FORWARD accepts before it rejects, and
+# fails loudly otherwise, instead of reporting a success it did not achieve.
 #
 # WHAT THE INSTANCE ALSO NEEDS (set on the Struct8 node, not here)
 #   * source_dest_check = false        -- or the ENI drops packets whose destination is not itself,
@@ -59,29 +69,55 @@ for attempt in 1 2 3 4 5; do
 done
 systemctl enable --now iptables
 
-# 4) Masquerade everything leaving that interface, so replies find their way back to the private
-#    hosts. POSTROUTING/MASQUERADE is the whole of the NAT. Insert idempotently (-C then -A) so a
-#    reboot that re-runs this, or a manual re-run, does not stack duplicate rules.
-add_rule() {
-  local table_args=()
-  if [ "$1" = "-t" ]; then table_args=(-t "$2"); shift 2; fi
-  iptables "${table_args[@]}" -C "$@" 2>/dev/null || iptables "${table_args[@]}" -A "$@"
-}
-add_rule -t nat POSTROUTING -o "$PRIMARY_IF" -j MASQUERADE
-add_rule FORWARD -i "$PRIMARY_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
-add_rule FORWARD -o "$PRIMARY_IF" -j ACCEPT
+# 4) The NAT rules.
+#
+#    POSTROUTING/MASQUERADE is the whole of the NAT: appended idempotently (-C then -A), since
+#    order does not matter in the nat table here.
+#
+#    The FORWARD ACCEPT rules, however, MUST sit ABOVE the default `-A FORWARD -j REJECT`. So they
+#    are first deleted if present (to avoid a stale copy below the REJECT and to keep the run
+#    idempotent across reboots) and then INSERTED at the top with -I FORWARD 1 / 2. Inserting #2
+#    after #1 leaves them in the order [RELATED,ESTABLISHED], [out], ..., REJECT.
+iptables -t nat -C POSTROUTING -o "$PRIMARY_IF" -j MASQUERADE 2>/dev/null \
+  || iptables -t nat -A POSTROUTING -o "$PRIMARY_IF" -j MASQUERADE
+
+# Drop any existing copies first (ignore errors when they are not there), then insert at the top.
+iptables -D FORWARD -i "$PRIMARY_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -o "$PRIMARY_IF" -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD 1 -i "$PRIMARY_IF" -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -I FORWARD 2 -o "$PRIMARY_IF" -j ACCEPT
 
 # 5) Persist the rules so a reboot does not quietly stop routing. iptables-services restores
 #    /etc/sysconfig/iptables at boot; saving now writes the live rules there.
 iptables-save > /etc/sysconfig/iptables
 
-# 6) Verify, rather than trust. The lab failed once with a log that claimed success while the rule
-#    was absent, so confirm the MASQUERADE rule is really in the live table and say the truth.
-if iptables -t nat -S POSTROUTING | grep -q -- "-A POSTROUTING -o ${PRIMARY_IF} -j MASQUERADE"; then
-  echo "NAT is up: ip_forward on, MASQUERADE on ${PRIMARY_IF}, rules persisted."
+# 6) Verify, rather than trust. The lab failed twice with a log that claimed success while routing
+#    was in fact broken, so confirm BOTH conditions and fail loudly otherwise:
+#      a) the MASQUERADE rule is in the live nat table, and
+#      b) in the FORWARD chain, our ACCEPT rules come BEFORE any REJECT (the AL2023 default REJECT
+#         sitting first is exactly what silently blocks forwarding).
+ok=1
+if ! iptables -t nat -S POSTROUTING | grep -q -- "-A POSTROUTING -o ${PRIMARY_IF} -j MASQUERADE"; then
+  echo "ERROR: MASQUERADE rule is NOT present. NAT is NOT working." >&2
+  ok=0
+fi
+
+# Read FORWARD in order; the first ACCEPT on our interface must appear before the first REJECT.
+fwd="$(iptables -S FORWARD)"
+accept_line="$(printf '%s\n' "$fwd" | grep -n -- "-A FORWARD .*-o ${PRIMARY_IF} -j ACCEPT" | head -1 | cut -d: -f1)"
+reject_line="$(printf '%s\n' "$fwd" | grep -n -- "-j REJECT" | head -1 | cut -d: -f1)"
+if [ -z "$accept_line" ]; then
+  echo "ERROR: FORWARD has no ACCEPT rule for ${PRIMARY_IF}. NAT is NOT working." >&2
+  ok=0
+elif [ -n "$reject_line" ] && [ "$accept_line" -gt "$reject_line" ]; then
+  echo "ERROR: a REJECT rule precedes our ACCEPT in FORWARD, so forwarding is blocked." >&2
+  ok=0
+fi
+
+if [ "$ok" = 1 ]; then
+  echo "NAT is up: ip_forward on, MASQUERADE on ${PRIMARY_IF}, FORWARD accepts before any reject, rules persisted."
 else
-  echo "ERROR: the MASQUERADE rule is NOT present after setup. NAT is NOT working." >&2
-  echo "Current nat POSTROUTING:" >&2
-  iptables -t nat -S POSTROUTING >&2
+  echo "Current nat POSTROUTING:" >&2; iptables -t nat -S POSTROUTING >&2
+  echo "Current FORWARD:" >&2; printf '%s\n' "$fwd" >&2
   exit 1
 fi
