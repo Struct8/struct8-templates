@@ -45,12 +45,16 @@ done
 
 echo "Running Uptime Kuma..."
 docker rm -f uptime-kuma 2>/dev/null || true
+# Image tag: `2` is the project's recommended tag -- the latest of the v2 series, which gets
+# the fixes and security updates. NOT `latest` (deprecated, still points at the unmaintained v1,
+# which makes the UI show an "outdated version" warning) and NOT `1` (the v1 series, also no longer
+# maintained). `2` tracks v2 without ever jumping to a future major that could break.
 docker run -d \
   --name uptime-kuma \
   --restart unless-stopped \
   -p 3001:3001 \
   -v uptime-kuma:/app/data \
-  louislam/uptime-kuma:1
+  louislam/uptime-kuma:2
 
 # Verify the container is actually up, rather than trust: a dead container is exactly what makes
 # the NAT port-forward answer "connection refused".
