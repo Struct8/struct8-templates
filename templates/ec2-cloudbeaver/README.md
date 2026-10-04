@@ -20,14 +20,27 @@ port **8978**, restarting it on reboot. Logs to `/var/log/user-data.log`.
 
 It hardcodes nothing about the account. If the template wires the instance to the
 database **and** enables "add environment variables", Struct8 writes the connection
-details to `/etc/struct8_env` and the script **pre-configures the connection** in
-CloudBeaver: it splits the endpoint into host/port, reads the user and password from
-the RDS-managed secret via the AWS CLI (the instance role is allowed to read it), and
-writes a `data-sources.json` into the workspace before starting the container. The
-user opens the UI with the connection already in the navigator.
+details to `/etc/struct8_env` and the script makes CloudBeaver open **ready to use**:
 
-When those variables are absent, it falls back to an empty CloudBeaver and the user
-adds the connection by hand.
+1. splits the endpoint into host/port and reads the user/password from the
+   RDS-managed secret via the AWS CLI (the instance role is allowed to read it), then
+   writes a `data-sources.json` into the workspace;
+2. skips the first-run server wizard by passing `CB_SERVER_NAME` + an admin
+   (`CB_ADMIN_NAME`/`CB_ADMIN_PASSWORD`) as container env vars — without a server name
+   CloudBeaver shows "Initial Server Configuration" and never loads the connection;
+3. grants the connection to the anonymous team
+   (`CLOUDBEAVER_APP_GRANT_CONNECTIONS_ACCESS_TO_ANONYMOUS_TEAM=true`), so the browser
+   opens straight into the navigator with the connection present.
+
+When those variables are absent, it falls back to a plain CloudBeaver and the user
+does the first-run setup and adds the connection by hand.
+
+> Note: the server is configured via container **environment variables**, not by
+> replacing `cloudbeaver.conf`. Replacing the file drops fields the image needs (e.g.
+> `contentRoot`), which sends the container into a restart loop with
+> `Base Resource is not valid: /var/www/cloudbeaver`. Verified on CloudBeaver
+> Community 26.2: `serverConfig.configurationMode=false` and the connection listed in
+> `userConnections`.
 
 Variables read from `/etc/struct8_env` (written by Struct8 when env vars are enabled):
 

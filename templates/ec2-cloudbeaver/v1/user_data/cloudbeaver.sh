@@ -8,11 +8,21 @@
 #
 # It hardcodes nothing about the account. If the template wires the instance to the
 # database AND enables "add environment variables", Struct8 writes the connection
-# details to /etc/struct8_env and this script PRE-CONFIGURES the connection in
-# CloudBeaver (host, port, database, and credentials fetched from Secrets Manager),
-# so the user opens the UI with the connection already there. When those variables
-# are absent it falls back to an empty CloudBeaver and the user adds the connection
-# by hand.
+# details to /etc/struct8_env and this script makes CloudBeaver open READY TO USE:
+#   - writes a pre-configured datasource (host, port, database, and credentials
+#     fetched from Secrets Manager) to the workspace;
+#   - skips the first-run server wizard (CB_SERVER_NAME + admin env vars), so the
+#     server boots already configured instead of showing "Initial Server
+#     Configuration";
+#   - grants the pre-configured connection to the anonymous team, so the browser
+#     opens straight into the navigator with the connection present.
+# When those variables are absent it falls back to a plain CloudBeaver and the user
+# does the first-run setup and adds the connection by hand.
+#
+# Why env vars and not a custom cloudbeaver.conf: replacing the image's conf drops
+# fields it needs (contentRoot -> "Base Resource is not valid: /var/www/cloudbeaver"
+# and a restart loop). The image already resolves CB_*/CLOUDBEAVER_* variables into
+# its own conf, so we only pass those and leave the file untouched.
 #
 # Variables read from /etc/struct8_env (written by Struct8 when env vars are enabled):
 #   AWS_DB_INSTANCE_ENDPOINT_0   host:port of the database
@@ -25,6 +35,7 @@ set -x
 
 CLOUDBEAVER_PORT="${CLOUDBEAVER_PORT:-8978}"
 CLOUDBEAVER_IMAGE="${CLOUDBEAVER_IMAGE:-dbeaver/cloudbeaver:latest}"
+CLOUDBEAVER_ADMIN_NAME="${CLOUDBEAVER_ADMIN_NAME:-cbadmin}"
 WORKSPACE_DIR="/opt/cloudbeaver/workspace"
 DBEAVER_CONF_DIR="${WORKSPACE_DIR}/GlobalConfiguration/.dbeaver"
 
@@ -39,9 +50,9 @@ systemctl start docker
 echo "Preparing the CloudBeaver workspace..."
 mkdir -p "$WORKSPACE_DIR"
 
+PRECONFIGURED=0
+
 # --- Pre-configure the database connection, if Struct8 provided the details ------
-# /etc/struct8_env is written by Struct8 when the instance is wired to the database
-# and "add environment variables" is enabled. Without it, CloudBeaver starts empty.
 if [ -f /etc/struct8_env ]; then
   # shellcheck disable=SC1091
   . /etc/struct8_env
@@ -51,6 +62,7 @@ DB_ENDPOINT="${AWS_DB_INSTANCE_ENDPOINT_0:-}"
 DB_NAME="${AWS_DB_INSTANCE_DB_NAME_0:-}"
 DB_SECRET_ARN="${AWS_DB_INSTANCE_SECRET_ARN_0:-}"
 AWS_REGION="${REGION:-$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/placement/region)}"
+PUBLIC_IP="$(curl -s --max-time 5 http://169.254.169.254/latest/meta-data/public-ipv4)"
 
 if [ -n "$DB_ENDPOINT" ] && [ -n "$DB_SECRET_ARN" ]; then
   echo "Struct8 provided database details -- pre-configuring the CloudBeaver connection..."
@@ -73,8 +85,9 @@ if [ -n "$DB_ENDPOINT" ] && [ -n "$DB_SECRET_ARN" ]; then
 
   mkdir -p "$DBEAVER_CONF_DIR"
 
-  # Pre-configured datasource. CloudBeaver reads this at startup; credentials in
-  # auth-properties are kept until the first open, then encrypted and removed.
+  # Pre-configured datasource. CloudBeaver reads this at startup once the server is
+  # configured; credentials in auth-properties are kept until the first open, then
+  # encrypted and removed from the file.
   cat > "${DBEAVER_CONF_DIR}/data-sources.json" <<EOFDS
 {
   "folders": {},
@@ -102,19 +115,46 @@ if [ -n "$DB_ENDPOINT" ] && [ -n "$DB_SECRET_ARN" ]; then
 EOFDS
   chmod 600 "${DBEAVER_CONF_DIR}/data-sources.json"
   echo "Wrote pre-configured connection to ${DBEAVER_CONF_DIR}/data-sources.json"
+  PRECONFIGURED=1
 else
-  echo "No database details in /etc/struct8_env -- starting CloudBeaver without a pre-configured connection."
+  echo "No database details in /etc/struct8_env -- starting CloudBeaver without pre-configuration."
 fi
 # ---------------------------------------------------------------------------------
 
 echo "Running CloudBeaver on port ${CLOUDBEAVER_PORT}..."
-docker run -d \
-  --name cloudbeaver \
-  --restart unless-stopped \
-  -p "${CLOUDBEAVER_PORT}:8978" \
-  -v "${WORKSPACE_DIR}:/opt/cloudbeaver/workspace" \
-  "$CLOUDBEAVER_IMAGE"
+if [ "$PRECONFIGURED" = "1" ]; then
+  # A random admin password: the admin account is only there so the first-run wizard
+  # is skipped; anonymous access is what the user actually browses with. Overridable
+  # via CLOUDBEAVER_ADMIN_PASSWORD if the template wants a known admin.
+  CB_ADMIN_PW="${CLOUDBEAVER_ADMIN_PASSWORD:-$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)Aa1!}"
+
+  # CB_SERVER_NAME present => the server boots configured and the wizard is skipped.
+  # GRANT_CONNECTIONS_ACCESS_TO_ANONYMOUS_TEAM => the pre-configured connection is
+  # visible to the anonymous user who opens the browser. Both verified on CloudBeaver
+  # Community 26.2 (serverConfig.configurationMode=false, connection listed).
+  docker run -d \
+    --name cloudbeaver \
+    --restart unless-stopped \
+    -p "${CLOUDBEAVER_PORT}:8978" \
+    -e CB_SERVER_NAME="${NAME:-Struct8 Demo} CloudBeaver" \
+    -e CB_SERVER_URL="http://${PUBLIC_IP}:${CLOUDBEAVER_PORT}" \
+    -e CB_ADMIN_NAME="${CLOUDBEAVER_ADMIN_NAME}" \
+    -e CB_ADMIN_PASSWORD="${CB_ADMIN_PW}" \
+    -e CLOUDBEAVER_APP_GRANT_CONNECTIONS_ACCESS_TO_ANONYMOUS_TEAM=true \
+    -v "${WORKSPACE_DIR}:/opt/cloudbeaver/workspace" \
+    "$CLOUDBEAVER_IMAGE"
+else
+  docker run -d \
+    --name cloudbeaver \
+    --restart unless-stopped \
+    -p "${CLOUDBEAVER_PORT}:8978" \
+    -v "${WORKSPACE_DIR}:/opt/cloudbeaver/workspace" \
+    "$CLOUDBEAVER_IMAGE"
+fi
 
 echo "Done. CloudBeaver is starting on port ${CLOUDBEAVER_PORT}."
-echo "Open http://<instance-public-ip>:${CLOUDBEAVER_PORT} and finish the first-run setup."
-echo "If the connection was pre-configured, it appears in the navigator after setup."
+if [ "$PRECONFIGURED" = "1" ]; then
+  echo "Open http://<instance-public-ip>:${CLOUDBEAVER_PORT} -- the connection is pre-loaded (anonymous access)."
+else
+  echo "Open http://<instance-public-ip>:${CLOUDBEAVER_PORT} and finish the first-run setup."
+fi
