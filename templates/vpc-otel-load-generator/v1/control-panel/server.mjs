@@ -349,6 +349,7 @@ async function route(req, res) {
   // N3: everything the agent (or the UI) needs to pre-fill the form.
   if (req.method === "GET" && path === "/api/config") {
     send(res, 200, {
+      authRequired: !!TOKEN,
       defaults: defaults(),
       profiles: loadProfiles(),
       suggestedEndpoints: suggestedEndpoints(),

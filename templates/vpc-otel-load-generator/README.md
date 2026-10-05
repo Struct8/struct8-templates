@@ -50,7 +50,8 @@ branch/tag/commit, default `main`).
    panel detects the change on its next poll and **mirrors it into the form automatically** (the
    endpoint, signals, workers, and the whole curve graph). The agent configures, the user's screen
    fills in by itself, and the user just reviews and clicks Start. `GET /api/draft` reads it.
-   Example: `curl -XPOST .../api/draft -H "x-panel-token: TOK" -d '{"by":"kiro","config":{...}}'`.
+   Example (no-auth lab default): `curl -XPOST .../api/draft -d '{"by":"kiro","config":{...}}'`
+   (add `-H "x-panel-token: TOK"` only if `OTEL_PANEL_TOKEN` is set).
 
 ## Node environment variables
 
@@ -74,6 +75,11 @@ branch/tag/commit, default `main`).
 
 ## Security
 
-The panel can fire OTLP load **from this instance at any endpoint**. On a public subnet with port
-80 open to the world, set `OTEL_PANEL_TOKEN` (and keep the ceilings sane) or restrict the security
-group ingress to your IP. This is a short-lived lab tool — delete the instance after the test.
+This is a **lab tool**: by default the panel has **no authentication** (so the user just opens the
+URL and uses it — no token to find or share). The panel can fire OTLP load from this instance at
+any endpoint, so protect it **at the network layer**: restrict the security group ingress on port
+80 to the operator's IP instead of `0.0.0.0/0`. Delete the instance after the test.
+
+If you do need the panel reachable from anywhere, set `OTEL_PANEL_TOKEN` — then every API call
+needs the header `x-panel-token`, and the panel shows a token field. Leave it unset for the
+no-auth lab default. Keep `OTEL_PANEL_MAX_WORKERS` / `OTEL_PANEL_MAX_DURATION` sane either way.

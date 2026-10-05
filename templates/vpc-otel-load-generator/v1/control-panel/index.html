@@ -444,6 +444,8 @@
         const { ok, data } = await api("/api/config");
         if (!ok) return;
         configLoaded = true;
+        // Lab mode: when the server requires no token, hide the token field entirely.
+        if (data.authRequired === false) { $("tokenField").hidden = true; }
         if (data.limits) { limits = { ...limits, ...data.limits }; els.workers.max = limits.maxWorkers; $("wHint").textContent = `1 to ${limits.maxWorkers}`; }
         profiles = data.profiles || []; fillProfileDropdown();
         renderSuggestions(data.suggestedEndpoints);
