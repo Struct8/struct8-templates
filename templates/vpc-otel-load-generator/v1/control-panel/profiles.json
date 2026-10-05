@@ -1,0 +1,47 @@
+{
+  "profiles": [
+    {
+      "name": "smoke (quick sanity)",
+      "mode": "constant",
+      "signals": ["traces", "metrics", "logs"],
+      "workers": 2,
+      "rate": 50,
+      "duration": "2m"
+    },
+    {
+      "name": "ramp to peak (autoscaling demo)",
+      "mode": "curve",
+      "signals": ["traces", "metrics", "logs"],
+      "workers": 6,
+      "points": [
+        { "t": 0, "vus": 0 },
+        { "t": 180, "vus": 300 },
+        { "t": 600, "vus": 1500 },
+        { "t": 900, "vus": 1500 },
+        { "t": 1080, "vus": 0 }
+      ]
+    },
+    {
+      "name": "spike",
+      "mode": "curve",
+      "signals": ["traces", "logs"],
+      "workers": 8,
+      "points": [
+        { "t": 0, "vus": 100 },
+        { "t": 120, "vus": 100 },
+        { "t": 150, "vus": 2000 },
+        { "t": 240, "vus": 2000 },
+        { "t": 270, "vus": 100 },
+        { "t": 420, "vus": 100 }
+      ]
+    },
+    {
+      "name": "soak (steady)",
+      "mode": "constant",
+      "signals": ["traces", "metrics", "logs"],
+      "workers": 4,
+      "rate": 400,
+      "duration": "30m"
+    }
+  ]
+}
