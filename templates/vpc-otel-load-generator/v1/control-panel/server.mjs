@@ -34,7 +34,13 @@ const PORT = Number(env.OTEL_PANEL_PORT ?? 80);
 const TG_IMAGE = env.TG_IMAGE ?? "ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest";
 const PLATFORM_FILE = env.TG_PLATFORM_FILE ?? "/opt/otelgen/platform";
 const PROFILES_FILE = env.OTEL_PROFILES_FILE ?? "/opt/otelgen/profiles.json";
-const TOKEN = (env.OTEL_PANEL_TOKEN ?? "").trim();
+// Token: a KNOWN default ("struct8-lab") so a lab user can authenticate without hunting for a
+// secret -- it is documented and the panel pre-fills it. Set OTEL_PANEL_TOKEN to a value of your
+// own for real protection (then it is NOT revealed by the API and the user must know it), or to
+// the empty string ("") to turn auth off entirely.
+const DEFAULT_TOKEN = "struct8-lab";
+const TOKEN = (env.OTEL_PANEL_TOKEN ?? DEFAULT_TOKEN).trim();
+const TOKEN_IS_DEFAULT = TOKEN === DEFAULT_TOKEN; // only a default/known token is revealed to the UI
 const MAX_WORKERS = positiveInt(env.OTEL_PANEL_MAX_WORKERS, 50);
 const MAX_DURATION_S = positiveInt(env.OTEL_PANEL_MAX_DURATION, 3600);
 const MAX_POINTS = 50;
@@ -344,12 +350,14 @@ async function route(req, res) {
     return;
   }
   if (!path.startsWith("/api/")) { send(res, 404, { error: "not found" }); return; }
-  if (!tokenOk(req)) { send(res, 401, { error: "This panel needs its access token." }); return; }
 
-  // N3: everything the agent (or the UI) needs to pre-fill the form.
+  // /api/config is PUBLIC (no token): the browser needs it to learn whether auth is on and to
+  // pre-fill the known default token. It exposes no run data and no custom secret -- defaultToken
+  // is non-empty ONLY when the token is the documented default; a custom token is never revealed.
   if (req.method === "GET" && path === "/api/config") {
     send(res, 200, {
       authRequired: !!TOKEN,
+      defaultToken: TOKEN && TOKEN_IS_DEFAULT ? TOKEN : "",
       defaults: defaults(),
       profiles: loadProfiles(),
       suggestedEndpoints: suggestedEndpoints(),
@@ -357,6 +365,9 @@ async function route(req, res) {
     });
     return;
   }
+
+  // Everything else requires the token (when one is set).
+  if (!tokenOk(req)) { send(res, 401, { error: "This panel needs its access token." }); return; }
 
   // Shared draft: the browser reads it to mirror what the agent configured.
   if (req.method === "GET" && path === "/api/draft") {

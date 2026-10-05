@@ -60,7 +60,7 @@ branch/tag/commit, default `main`).
 | `OTLP_ENDPOINT` | Pre-fills the panel's endpoint field (host:port). | — |
 | `OTEL_PANEL` | `on` to serve the web panel on port 80. | off |
 | `OTEL_PANEL_REF` | Git ref to fetch the panel files from. | `main` |
-| `OTEL_PANEL_TOKEN` | When set, every panel API call needs header `x-panel-token`. | unset (no auth) |
+| `OTEL_PANEL_TOKEN` | API token (header `x-panel-token`). Default is the known value `struct8-lab`, pre-filled in the panel. Set your own for real auth (then it is NOT revealed by the API); set `""` to disable auth. | `struct8-lab` |
 | `OTEL_PANEL_MAX_WORKERS` | Ceiling on workers per run. | 50 |
 | `OTEL_PANEL_MAX_DURATION` | Ceiling on run duration, seconds. | 3600 |
 | `OTEL_DEF_ENDPOINT` | N1 default: endpoint (falls back to `OTLP_ENDPOINT`). | — |
@@ -75,11 +75,16 @@ branch/tag/commit, default `main`).
 
 ## Security
 
-This is a **lab tool**: by default the panel has **no authentication** (so the user just opens the
-URL and uses it — no token to find or share). The panel can fire OTLP load from this instance at
-any endpoint, so protect it **at the network layer**: restrict the security group ingress on port
-80 to the operator's IP instead of `0.0.0.0/0`. Delete the instance after the test.
+This is a **lab tool**. The panel ships with a **known default token** `struct8-lab`, which the
+panel pre-fills — so a lab user just opens the URL and goes, while the panel is not wide open to
+anyone who finds the IP with zero barrier. Three levels, by `OTEL_PANEL_TOKEN`:
 
-If you do need the panel reachable from anywhere, set `OTEL_PANEL_TOKEN` — then every API call
-needs the header `x-panel-token`, and the panel shows a token field. Leave it unset for the
-no-auth lab default. Keep `OTEL_PANEL_MAX_WORKERS` / `OTEL_PANEL_MAX_DURATION` sane either way.
+- **unset** → default `struct8-lab` (documented, pre-filled). Fine for a throwaway lab.
+- **your own value** → real auth: the token is NOT revealed by the API, the user must know it.
+- **`""`** (empty) → no auth at all.
+
+A documented default is a *weak* barrier (anyone who read this knows it), so for anything beyond a
+quick lab, protect it **at the network layer** too: restrict the security group ingress on port 80
+to the operator's IP instead of `0.0.0.0/0`. The panel can fire OTLP load from this instance at any
+endpoint. Keep `OTEL_PANEL_MAX_WORKERS` / `OTEL_PANEL_MAX_DURATION` sane. Delete the instance after
+the test.

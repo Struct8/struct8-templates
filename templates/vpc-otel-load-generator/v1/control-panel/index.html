@@ -110,7 +110,7 @@
         <div class="field" id="tokenField" hidden>
           <label for="token">Access token</label>
           <input id="token" type="password" autocomplete="off" />
-          <div class="hint">This panel requires the token set in OTEL_PANEL_TOKEN on the instance.</div>
+          <div class="hint">Lab default is <code>struct8-lab</code> (pre-filled). Change it, or set your own in OTEL_PANEL_TOKEN on the instance.</div>
         </div>
 
         <div class="field" id="profileField" hidden>
@@ -444,8 +444,20 @@
         const { ok, data } = await api("/api/config");
         if (!ok) return;
         configLoaded = true;
-        // Lab mode: when the server requires no token, hide the token field entirely.
-        if (data.authRequired === false) { $("tokenField").hidden = true; }
+        // Token handling:
+        //  - no auth  -> hide the token field entirely (lab, open).
+        //  - default  -> pre-fill the field with the known default so the user just proceeds; the
+        //                field stays visible so they SEE it and can change it.
+        //  - custom   -> show an empty field; the user must know and type the token.
+        if (data.authRequired === false) {
+          $("tokenField").hidden = true;
+        } else {
+          $("tokenField").hidden = false;
+          if (!els.token.value && data.defaultToken) {
+            els.token.value = data.defaultToken;
+            sessionStorage.setItem("otelPanelToken", data.defaultToken);
+          }
+        }
         if (data.limits) { limits = { ...limits, ...data.limits }; els.workers.max = limits.maxWorkers; $("wHint").textContent = `1 to ${limits.maxWorkers}`; }
         profiles = data.profiles || []; fillProfileDropdown();
         renderSuggestions(data.suggestedEndpoints);
