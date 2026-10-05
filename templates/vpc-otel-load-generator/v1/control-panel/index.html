@@ -54,6 +54,10 @@
     .agent-note { background: rgba(125,100,255,0.12); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #cdc4ff; display: flex; gap: 8px; align-items: center; }
     @keyframes flash { 0% { background: rgba(125,100,255,0.4); } 100% { background: rgba(125,100,255,0.12); } }
     .agent-note.flash { animation: flash 1s ease-out; }
+    .health-alert { background: rgba(248,81,73,0.12); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #ffc4c0; display: flex; gap: 10px; align-items: flex-start; }
+    .health-alert .ico { font-size: 15px; line-height: 1.2; }
+    .health-alert strong { display: block; }
+    .health-alert .tip { color: var(--muted); margin-top: 2px; }
     .logs { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-family: ui-monospace, monospace; font-size: 12px; color: #b4c4d6; height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
     .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
     a { color: #a99bff; }
@@ -105,6 +109,7 @@
       <h2 id="cfg-title">Run configuration</h2>
       <div id="errors" class="errors" role="alert" hidden></div>
       <div id="agentNote" class="agent-note" role="status" hidden></div>
+      <div id="healthAlert" class="health-alert" role="alert" hidden></div>
 
       <form id="form" novalidate>
         <div class="field" id="tokenField" hidden>
@@ -467,12 +472,28 @@
       } catch (e) { if (e.status === 401) els.status.textContent = "Token required"; }
     }
 
+    function renderHealth(h) {
+      const box = $("healthAlert");
+      box.replaceChildren();
+      if (!h || !h.failing) { box.hidden = true; return; }
+      const ico = document.createElement("span"); ico.className = "ico"; ico.textContent = "⛔";
+      const txt = document.createElement("div");
+      const head = document.createElement("strong");
+      head.textContent = "Load is being sent but the endpoint is rejecting it — nothing is landing.";
+      const tip = document.createElement("div"); tip.className = "tip";
+      tip.textContent = h.cause || "Check the OTLP endpoint host, port and protocol. If the gateway/backend is not up yet, start it and run again.";
+      txt.append(head, tip);
+      box.append(ico, txt);
+      box.hidden = false;
+    }
+
     async function refresh() {
       try {
         if (!configLoaded) await loadConfig();
         const { data: s } = await api("/api/status");
         setRunning(!!s.running);
         els.status.textContent = s.running ? "Running" : "Idle";
+        renderHealth(s.health);
         await syncDraft(s.draftRev);
         if (s.scheduler) {
           runCurveTotal = s.scheduler.totalSeconds || runCurveTotal;

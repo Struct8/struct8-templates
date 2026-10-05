@@ -34,6 +34,10 @@ same shape as the `vpc-k6-load-generator` panel, so if you know one you know the
   presets as k6 (ramp / spike / step / soak) and an editable stage table. telemetrygen has no
   built-in ramp, so the panel runs the curve as back-to-back phases (each segment held at its mean
   rate), which produces the same rising/falling load — enough to watch services scale out and in.
+- **Health check**: telemetrygen keeps sending even when the endpoint rejects everything (404, DNS,
+  refused), so "running" alone does not mean it is landing. The panel reads the output and shows a
+  red alert naming the likely cause when exports are failing — so a run against a down/missing
+  gateway is obvious instead of silently green.
 
 The panel files are fetched from this folder in the public repo at boot (`OTEL_PANEL_REF` pins a
 branch/tag/commit, default `main`).
