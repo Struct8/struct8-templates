@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OTLP Load Generator</title>
+  <style>
+    :root {
+      --bg: #0f1419; --panel: #1a1f29; --panel-2: #232a36; --border: #2e3744;
+      --text: #e6edf3; --muted: #9aa7b8; --accent: #7d64ff; --accent-hover: #9080ff;
+      --ok: #3fb950; --stop: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5; }
+    header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; flex-wrap: wrap;
+      border-bottom: 1px solid var(--border); background: var(--panel); }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    .otlp { color: var(--accent); font-weight: 700; }
+    .status-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
+      border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--border); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .dot.running { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.4s infinite; }
+    @media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+    main { display: grid; grid-template-columns: 400px 1fr; gap: 20px; padding: 24px; max-width: 1300px; margin: 0 auto; }
+    @media (max-width: 920px) { main { grid-template-columns: 1fr; } }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .card h2 { margin: 0 0 16px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+    label { display: block; font-size: 13px; margin-bottom: 6px; font-weight: 500; }
+    .field { margin-bottom: 16px; }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    input, select { width: 100%; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 14px; font-family: inherit; }
+    input[aria-invalid="true"] { border-color: var(--stop); }
+    input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .signals { display: flex; gap: 8px; }
+    .signals label { display: flex; align-items: center; gap: 7px; margin: 0; padding: 8px 12px; flex: 1;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; font-weight: 500; }
+    .signals label:has(input:checked) { border-color: var(--accent); background: rgba(125,100,255,0.12); }
+    .signals input { width: auto; }
+    .actions { display: flex; gap: 12px; margin-top: 8px; }
+    button { padding: 12px; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit; }
+    .actions button { flex: 1; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-start { background: var(--accent); color: #fff; }
+    .btn-start:not(:disabled):hover { background: var(--accent-hover); }
+    .btn-stop { background: var(--stop); color: #fff; }
+    .chip { display: inline-block; margin: 4px 6px 0 0; padding: 3px 10px; font-size: 12px; border-radius: 999px;
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; font-weight: 500; }
+    .errors { background: rgba(248,81,73,0.1); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px;
+      margin-bottom: 16px; font-size: 13px; color: #ffc4c0; }
+    .errors ul { margin: 4px 0 0; padding-left: 18px; }
+    .logs { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+      font-family: ui-monospace, monospace; font-size: 12px; color: #b4c4d6; height: 420px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word; margin: 0; }
+    .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
+    [hidden] { display: none !important; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="otlp">OTLP</span> Load Generator</h1>
+    <span class="status-pill" role="status" aria-live="polite"><span id="dot" class="dot" aria-hidden="true"></span><span id="statusText">Connecting…</span></span>
+  </header>
+
+  <main>
+    <section class="card" aria-labelledby="cfg-title">
+      <h2 id="cfg-title">Run configuration</h2>
+      <div id="errors" class="errors" role="alert" hidden></div>
+
+      <form id="form" novalidate>
+        <div class="field" id="tokenField" hidden>
+          <label for="token">Access token</label>
+          <input id="token" type="password" autocomplete="off" />
+          <div class="hint">This panel requires the token set in OTEL_PANEL_TOKEN on the instance.</div>
+        </div>
+
+        <div class="field">
+          <label for="endpoint">OTLP endpoint (host:port)</label>
+          <input id="endpoint" placeholder="otel.example.com:443" required aria-describedby="epHint" />
+          <div class="hint" id="epHint">No scheme. Via an ALB use host:443 + HTTP; direct to a collector use host:4317 + gRPC.</div>
+          <div id="suggestions"></div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="protocol">Protocol</label>
+            <select id="protocol"><option value="grpc">gRPC</option><option value="http">HTTP</option></select>
+          </div>
+          <div class="field">
+            <label for="insecure">TLS</label>
+            <select id="insecure"><option value="false">TLS (secure)</option><option value="true">Insecure (plaintext)</option></select>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>Signals</label>
+          <div class="signals">
+            <label><input type="checkbox" class="sig" value="traces" checked /> Traces</label>
+            <label><input type="checkbox" class="sig" value="metrics" checked /> Metrics</label>
+            <label><input type="checkbox" class="sig" value="logs" checked /> Logs</label>
+          </div>
+          <div class="hint">Each selected signal runs as its own telemetrygen container, in parallel.</div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="workers">Workers</label>
+            <input id="workers" type="number" min="1" value="4" required aria-describedby="wHint" />
+            <div class="hint" id="wHint"></div>
+          </div>
+          <div class="field">
+            <label for="rate">Rate (per s)</label>
+            <input id="rate" type="number" min="1" value="200" aria-describedby="rHint" />
+            <div class="hint" id="rHint">traces/logs only; metrics ignores it.</div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="duration">Duration</label>
+          <input id="duration" value="10m" required aria-describedby="dHint" />
+          <div class="hint" id="dHint">e.g. 30s, 5m, 1h. Longer than the scale-out cooldown so you can see it scale.</div>
+          <div>
+            <span class="chip" data-dur="1m">1m</span>
+            <span class="chip" data-dur="5m">5m</span>
+            <span class="chip" data-dur="10m">10m</span>
+            <span class="chip" data-dur="30m">30m</span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit" id="startBtn" class="btn-start">Start load</button>
+          <button type="button" id="stopBtn" class="btn-stop" disabled>Stop</button>
+        </div>
+      </form>
+      <div class="meta" id="meta"></div>
+    </section>
+
+    <section class="card" aria-labelledby="out-title">
+      <h2 id="out-title">Run output</h2>
+      <pre id="logs" class="logs" tabindex="0" aria-label="telemetrygen output">No run yet.</pre>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const els = { start: $("startBtn"), stop: $("stopBtn"), dot: $("dot"), status: $("statusText"),
+      errors: $("errors"), logs: $("logs"), meta: $("meta"), token: $("token"),
+      endpoint: $("endpoint"), protocol: $("protocol"), insecure: $("insecure"),
+      workers: $("workers"), rate: $("rate"), duration: $("duration") };
+
+    let running = null;
+    let limits = { maxWorkers: 50, maxDurationSeconds: 3600 };
+    els.token.value = sessionStorage.getItem("otelPanelToken") || "";
+
+    function showErrors(list) {
+      els.errors.replaceChildren();
+      if (!list || !list.length) { els.errors.hidden = true; return; }
+      const title = document.createElement("strong");
+      title.textContent = "Could not complete the request:";
+      const ul = document.createElement("ul");
+      for (const e of list) { const li = document.createElement("li"); li.textContent = e; ul.append(li); }
+      els.errors.append(title, ul);
+      els.errors.hidden = false;
+    }
+
+    async function api(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (els.token.value) headers["x-panel-token"] = els.token.value;
+      const r = await fetch(path, { ...options, headers });
+      if (r.status === 401) { $("tokenField").hidden = false; throw Object.assign(new Error("unauthorized"), { status: 401 }); }
+      const data = await r.json().catch(() => ({}));
+      return { ok: r.ok, status: r.status, data };
+    }
+
+    function selectedSignals() {
+      return [...document.querySelectorAll(".sig:checked")].map((c) => c.value);
+    }
+
+    function renderSuggestions(list) {
+      const box = $("suggestions");
+      box.replaceChildren();
+      for (const s of (list || [])) {
+        const chip = document.createElement("span");
+        chip.className = "chip"; chip.textContent = s;
+        chip.addEventListener("click", () => { els.endpoint.value = s; });
+        box.append(chip);
+      }
+    }
+
+    document.querySelectorAll(".chip[data-dur]").forEach((c) =>
+      c.addEventListener("click", () => { els.duration.value = c.dataset.dur; }));
+
+    function setRunning(isRunning) {
+      running = isRunning;
+      els.start.disabled = isRunning;
+      els.stop.disabled = !isRunning;
+      els.dot.classList.toggle("running", isRunning);
+      els.status.textContent = isRunning ? "Running" : "Idle";
+    }
+
+    async function refresh() {
+      try {
+        const { ok, data } = await api("/api/status");
+        if (!ok) return;
+        if (data.limits) {
+          limits = data.limits;
+          $("wHint").textContent = `1 to ${limits.maxWorkers}`;
+          els.workers.max = limits.maxWorkers;
+        }
+        if (!$("suggestions").children.length) renderSuggestions(data.suggestedEndpoints);
+        setRunning(!!data.running);
+        if (data.logs) els.logs.textContent = data.logs;
+        if (data.signals) {
+          els.meta.textContent = data.signals
+            .filter((s) => s.present)
+            .map((s) => `${s.signal}: ${s.running ? "running" : (s.lastRun ? "exit " + s.lastRun.exitCode : "idle")}`)
+            .join("  ·  ");
+        }
+      } catch (e) { if (e.status !== 401) els.status.textContent = "Panel unreachable"; }
+    }
+
+    $("form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      showErrors([]);
+      sessionStorage.setItem("otelPanelToken", els.token.value || "");
+      const body = {
+        endpoint: els.endpoint.value.trim(),
+        protocol: els.protocol.value,
+        insecure: els.insecure.value === "true",
+        signals: selectedSignals(),
+        workers: Number(els.workers.value),
+        rate: Number(els.rate.value),
+        duration: els.duration.value.trim(),
+      };
+      const { ok, data } = await api("/api/start", {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!ok) { showErrors(data.errors || ["Could not start the run."]); return; }
+      setRunning(true);
+      refresh();
+    });
+
+    els.stop.addEventListener("click", async () => {
+      await api("/api/stop", { method: "POST" });
+      refresh();
+    });
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>
