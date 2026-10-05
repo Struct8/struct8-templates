@@ -51,6 +51,9 @@
     .chip { display: inline-block; margin: 4px 6px 0 0; padding: 3px 10px; font-size: 12px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; font-weight: 500; }
     .errors { background: rgba(248,81,73,0.1); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #ffc4c0; }
     .errors ul { margin: 4px 0 0; padding-left: 18px; }
+    .agent-note { background: rgba(125,100,255,0.12); border: 1px solid var(--accent); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #cdc4ff; display: flex; gap: 8px; align-items: center; }
+    @keyframes flash { 0% { background: rgba(125,100,255,0.4); } 100% { background: rgba(125,100,255,0.12); } }
+    .agent-note.flash { animation: flash 1s ease-out; }
     .logs { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-family: ui-monospace, monospace; font-size: 12px; color: #b4c4d6; height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
     .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
     a { color: #a99bff; }
@@ -101,6 +104,7 @@
     <section class="card" aria-labelledby="cfg-title">
       <h2 id="cfg-title">Run configuration</h2>
       <div id="errors" class="errors" role="alert" hidden></div>
+      <div id="agentNote" class="agent-note" role="status" hidden></div>
 
       <form id="form" novalidate>
         <div class="field" id="tokenField" hidden>
@@ -364,6 +368,49 @@
       applyProfile(p);
     });
 
+    // Apply a full config object into the form (used by the shared draft the agent writes).
+    // Same shape as a profile: endpoint/protocol/insecure/signals/workers + constant(rate,duration)
+    // or curve(points). It mirrors whatever the agent set, including the curve graph.
+    function applyConfig(cfg) {
+      if (!cfg || typeof cfg !== "object") return;
+      if (cfg.endpoint !== undefined) els.endpoint.value = cfg.endpoint;
+      if (cfg.protocol) els.protocol.value = cfg.protocol;
+      if (cfg.insecure !== undefined) els.insecure.value = String(cfg.insecure);
+      if (Array.isArray(cfg.signals)) setSignals(cfg.signals);
+      if (cfg.workers) els.workers.value = cfg.workers;
+      if (cfg.mode === "curve" && Array.isArray(cfg.points) && cfg.points.length >= 2) {
+        mode = "curve"; localStorage.setItem("otelPanelMode", "curve");
+        points = cfg.points.map((q) => ({ t: Number(q.t), vus: Number(q.vus) }));
+        activeIndex = -1; fitAxes();
+      } else if (cfg.mode === "constant") {
+        mode = "constant"; localStorage.setItem("otelPanelMode", "constant");
+        if (cfg.rate) els.rate.value = cfg.rate;
+        if (cfg.duration) els.duration.value = cfg.duration;
+      }
+      applyMode();
+    }
+
+    // The shared draft: when the agent writes a new draft, draftRev changes; mirror it into the form.
+    let lastDraftRev = 0, draftInitialized = false;
+    async function syncDraft(draftRev) {
+      // Do not clobber the form mid-typing or during a run.
+      if (running) return;
+      if (document.activeElement && ["INPUT","SELECT"].includes(document.activeElement.tagName)) return;
+      if (draftRev === undefined || draftRev === lastDraftRev) return;
+      try {
+        const { ok, data } = await api("/api/draft");
+        if (!ok || !data || !data.config) { lastDraftRev = draftRev; return; }
+        const first = !draftInitialized;
+        lastDraftRev = data.rev; draftInitialized = true;
+        if (first && data.rev === 0) return; // nothing set yet
+        applyConfig(data.config);
+        const note = $("agentNote");
+        const when = data.at ? new Date(data.at).toLocaleTimeString() : "";
+        note.textContent = `⟳ Configuration set by ${data.by || "agent"}${when ? " at " + when : ""} — review and press Start.`;
+        note.hidden = false; note.classList.remove("flash"); void note.offsetWidth; note.classList.add("flash");
+      } catch (e) { /* keep old lastDraftRev so we retry next poll */ }
+    }
+
     // ---------- defaults (N1) ----------
     function applyDefaults(d) {
       if (!d) return;
@@ -412,6 +459,7 @@
         const { data: s } = await api("/api/status");
         setRunning(!!s.running);
         els.status.textContent = s.running ? "Running" : "Idle";
+        await syncDraft(s.draftRev);
         if (s.scheduler) {
           runCurveTotal = s.scheduler.totalSeconds || runCurveTotal;
           els.meta.textContent = `phase ${s.scheduler.phase}/${s.scheduler.totalPhases} · elapsed ${fmtDur(s.scheduler.elapsedSeconds)}${s.scheduler.totalSeconds?` / ${fmtDur(s.scheduler.totalSeconds)}`:""}`;
