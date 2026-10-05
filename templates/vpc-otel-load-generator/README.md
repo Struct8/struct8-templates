@@ -46,6 +46,11 @@ branch/tag/commit, default `main`).
    `/opt/otelgen/profiles.json` by the node). The user picks one from a dropdown.
 3. **Agent API (N3)** — `GET /api/config` returns defaults + profiles + limits; `POST /api/profile`
    saves a named profile. So an agent can prepare runs without touching the browser.
+4. **Live mirror (N3+)** — `POST /api/draft` with a config object sets a shared draft; every open
+   panel detects the change on its next poll and **mirrors it into the form automatically** (the
+   endpoint, signals, workers, and the whole curve graph). The agent configures, the user's screen
+   fills in by itself, and the user just reviews and clicks Start. `GET /api/draft` reads it.
+   Example: `curl -XPOST .../api/draft -H "x-panel-token: TOK" -d '{"by":"kiro","config":{...}}'`.
 
 ## Node environment variables
 

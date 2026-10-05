@@ -99,6 +99,18 @@ function saveProfiles(list) {
   writeFileSync(PROFILES_FILE, JSON.stringify({ profiles: list }, null, 2));
 }
 
+// --- shared DRAFT config (agent writes, every open browser mirrors it) --------------------------
+// The point: an agent (or a second person) sets the form up, and the user's open panel reflects it
+// WITHOUT the user typing. The browser polls /api/draft; when `rev` changes it copies the fields
+// into the form (including the curve). It is a draft, not a run -- the user still clicks Start
+// (or the agent calls /api/start). Kept in memory: it resets if the panel restarts.
+let draft = { rev: 0, at: 0, by: "", config: null };
+
+function setDraft(config, by) {
+  draft = { rev: draft.rev + 1, at: Date.now(), by: String(by || "agent"), config };
+  return draft;
+}
+
 function suggestedEndpoints() {
   const out = [];
   const d = defaults();
@@ -345,6 +357,25 @@ async function route(req, res) {
     return;
   }
 
+  // Shared draft: the browser reads it to mirror what the agent configured.
+  if (req.method === "GET" && path === "/api/draft") {
+    send(res, 200, draft);
+    return;
+  }
+
+  // Shared draft: the agent writes the form config here; open browsers pick it up on the next poll.
+  // Validation is LENIENT on purpose -- a draft may be partial (just a curve, say), and the strict
+  // check happens at /api/start. We only sanity-check types so the browser can apply it safely.
+  if (req.method === "POST" && path === "/api/draft") {
+    const body = await readJson(req);
+    const cfg = body && typeof body === "object" ? (body.config ?? body) : null;
+    if (!cfg || typeof cfg !== "object") { send(res, 400, { errors: ["Send a config object (or {config:{...}})."] }); return; }
+    const d = setDraft(cfg, body.by);
+    console.log(JSON.stringify({ panel: "draft-set", rev: d.rev, by: d.by }));
+    send(res, 200, d);
+    return;
+  }
+
   // N3: save/replace a named profile so the agent can set runs up for the user.
   if (req.method === "POST" && path === "/api/profile") {
     const body = await readJson(req);
@@ -364,6 +395,7 @@ async function route(req, res) {
     send(res, 200, {
       ...s,
       scheduler: schedulerInfo(),
+      draftRev: draft.rev,
       logs: logText.length > 20000 ? logText.slice(-20000) : logText,
     });
     return;
