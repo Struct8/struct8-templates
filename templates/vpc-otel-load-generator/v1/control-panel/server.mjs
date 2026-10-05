@@ -237,6 +237,23 @@ async function logs(tail) {
   return chunks.join("\n\n");
 }
 
+// Reads the telemetrygen output to tell whether the run is actually LANDING or just failing into
+// the void. A run can show "running" (containers up) while every export is rejected (404, refused,
+// DNS). telemetrygen logs one line per failed export; we count them and classify the cause, so the
+// panel can warn the moment it goes bad -- the OTLP equivalent of the k6 panel's health check.
+function health(logText) {
+  if (!logText) return null;
+  const fails = (logText.match(/failed to send|export:\s*failed|connection refused|context deadline exceeded|no such host|FATAL/gi) || []).length;
+  if (fails === 0) return null;
+  let cause = null;
+  if (/404|no route matched/i.test(logText)) cause = "The endpoint returns 404 — no OTLP receiver on that host/port/path (is the gateway up?).";
+  else if (/no such host|lookup/i.test(logText)) cause = "DNS does not resolve the endpoint host.";
+  else if (/connection refused/i.test(logText)) cause = "Connection refused — nothing is listening on that port.";
+  else if (/deadline exceeded|timeout|i\/o timeout/i.test(logText)) cause = "Timed out — wrong port, or a security group is blocking it.";
+  else if (/tls|x509|certificate/i.test(logText)) cause = "TLS error — try the other protocol/port, or check the certificate.";
+  return { failing: true, failCount: fails, cause };
+}
+
 function argsFor(signal, cfg, rate, duration) {
   const a = ["run", "-d", "--name", containerFor(signal)];
   const platform = readTrimmed(PLATFORM_FILE);
@@ -408,6 +425,7 @@ async function route(req, res) {
       ...s,
       scheduler: schedulerInfo(),
       draftRev: draft.rev,
+      health: s.running ? health(logText) : null,
       logs: logText.length > 20000 ? logText.slice(-20000) : logText,
     });
     return;
