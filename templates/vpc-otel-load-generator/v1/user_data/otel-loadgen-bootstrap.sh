@@ -15,6 +15,14 @@
 # or through Debug Access / SSM with /opt/otelgen/run.sh. Config comes from the environment per run:
 #   OTLP_ENDPOINT=otel.example.com:443 OTLP_PROTOCOL=http OTLP_INSECURE=false \
 #     SIGNAL=traces WORKERS=4 RATE=200 DURATION=5m /opt/otelgen/run.sh
+#
+# PANEL DEFAULTS (N1) -- the agent sets these on the node and the panel form opens pre-filled, so
+# the user just reviews and clicks Start:
+#   OTEL_DEF_ENDPOINT (falls back to OTLP_ENDPOINT), OTEL_DEF_PROTOCOL (http|grpc),
+#   OTEL_DEF_INSECURE (true|false), OTEL_DEF_SIGNALS ("traces,metrics,logs"),
+#   OTEL_DEF_WORKERS, OTEL_DEF_RATE, OTEL_DEF_DURATION (e.g. 10m), OTEL_DEF_MODE (constant|curve).
+# PANEL PROFILES (N2) -- named runs the user picks from a dropdown. Seeded from this template's
+#   control-panel/profiles.json unless the node already placed /opt/otelgen/profiles.json.
 LOGFILE="/var/log/user-data.log"
 exec >$LOGFILE 2>&1
 set -x
@@ -110,6 +118,11 @@ case "$(echo "${OTEL_PANEL:-off}" | tr '[:upper:]' '[:lower:]')" in
     for f in server.mjs index.html; do
       curl -fsSL --retry 5 --retry-delay 3 -o "/opt/otelgen/panel/$f" "$PANEL_SRC/$f" || PANEL_OK=0
     done
+    # profiles.json seeds the named load profiles (N2). Optional: a missing file just means no presets.
+    # It is only seeded if the node did not already drop one at /opt/otelgen/profiles.json.
+    if [ ! -f /opt/otelgen/profiles.json ]; then
+      curl -fsSL --retry 3 --retry-delay 2 -o /opt/otelgen/profiles.json "$PANEL_SRC/profiles.json" || echo "no profiles.json seed (optional)"
+    fi
     if [ "$PANEL_OK" = 1 ]; then
       cat > /etc/systemd/system/struct8-otel-panel.service <<'PANELEOF'
 [Unit]

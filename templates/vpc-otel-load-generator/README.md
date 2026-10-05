@@ -26,10 +26,26 @@ OTLP_ENDPOINT=otel.example.com:443 OTLP_PROTOCOL=http OTLP_INSECURE=false \
 
 ### Web control panel (optional)
 
-Set `OTEL_PANEL=on` on the instance to serve a browser UI on **port 80**: pick the endpoint,
-protocol, signals (traces/metrics/logs, each its own container in parallel), workers, rate and
-duration, with Start/Stop and live output. The panel files are fetched from this folder in the
-public repo at boot (`OTEL_PANEL_REF` pins a branch/tag/commit, default `main`).
+Set `OTEL_PANEL=on` on the instance to serve a browser UI on **port 80**. It is deliberately the
+same shape as the `vpc-k6-load-generator` panel, so if you know one you know the other:
+
+- **Constant** mode: endpoint, protocol, TLS, signals, workers, rate, duration — Start/Stop.
+- **Curve** mode (carga variável no tempo): a draggable graph of **rate over time** with the same
+  presets as k6 (ramp / spike / step / soak) and an editable stage table. telemetrygen has no
+  built-in ramp, so the panel runs the curve as back-to-back phases (each segment held at its mean
+  rate), which produces the same rising/falling load — enough to watch services scale out and in.
+
+The panel files are fetched from this folder in the public repo at boot (`OTEL_PANEL_REF` pins a
+branch/tag/commit, default `main`).
+
+### Three levels of configuration (so an agent can set it up for the user)
+
+1. **Defaults (N1)** — `OTEL_DEF_*` env vars pre-fill the form. The agent sets them on the node;
+   the user opens the panel already configured.
+2. **Profiles (N2)** — named runs in `profiles.json` (seeded from this folder, or dropped at
+   `/opt/otelgen/profiles.json` by the node). The user picks one from a dropdown.
+3. **Agent API (N3)** — `GET /api/config` returns defaults + profiles + limits; `POST /api/profile`
+   saves a named profile. So an agent can prepare runs without touching the browser.
 
 ## Node environment variables
 
@@ -41,6 +57,15 @@ public repo at boot (`OTEL_PANEL_REF` pins a branch/tag/commit, default `main`).
 | `OTEL_PANEL_TOKEN` | When set, every panel API call needs header `x-panel-token`. | unset (no auth) |
 | `OTEL_PANEL_MAX_WORKERS` | Ceiling on workers per run. | 50 |
 | `OTEL_PANEL_MAX_DURATION` | Ceiling on run duration, seconds. | 3600 |
+| `OTEL_DEF_ENDPOINT` | N1 default: endpoint (falls back to `OTLP_ENDPOINT`). | — |
+| `OTEL_DEF_PROTOCOL` | N1 default: `http` or `grpc`. | `http` |
+| `OTEL_DEF_INSECURE` | N1 default: `true`/`false`. | `false` |
+| `OTEL_DEF_SIGNALS` | N1 default: e.g. `traces,metrics,logs`. | all three |
+| `OTEL_DEF_WORKERS` | N1 default: workers. | 4 |
+| `OTEL_DEF_RATE` | N1 default: rate per second. | 200 |
+| `OTEL_DEF_DURATION` | N1 default: duration (constant mode). | `10m` |
+| `OTEL_DEF_MODE` | N1 default: `constant` or `curve`. | `constant` |
+| `OTEL_PROFILES_FILE` | Path to the profiles JSON on the instance. | `/opt/otelgen/profiles.json` |
 
 ## Security
 

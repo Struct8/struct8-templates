@@ -8,36 +8,36 @@
     :root {
       --bg: #0f1419; --panel: #1a1f29; --panel-2: #232a36; --border: #2e3744;
       --text: #e6edf3; --muted: #9aa7b8; --accent: #7d64ff; --accent-hover: #9080ff;
-      --ok: #3fb950; --stop: #f85149;
+      --ok: #3fb950; --stop: #f85149; --grid: #222a36; --axis: #3a4553;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      background: var(--bg); color: var(--text); line-height: 1.5; }
-    header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; flex-wrap: wrap;
-      border-bottom: 1px solid var(--border); background: var(--panel); }
+    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    header { display: flex; align-items: center; gap: 16px; padding: 14px 24px; flex-wrap: wrap; border-bottom: 1px solid var(--border); background: var(--panel); }
     header h1 { font-size: 18px; margin: 0; font-weight: 600; }
     .otlp { color: var(--accent); font-weight: 700; }
-    .status-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
-      border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--border); }
+    .modes { display: inline-flex; padding: 3px; gap: 2px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); }
+    .modes label { margin: 0; padding: 4px 16px; border-radius: 999px; font-size: 13px; color: var(--muted); cursor: pointer; }
+    .modes input { position: absolute; opacity: 0; pointer-events: none; }
+    .modes label:has(input:checked) { background: var(--accent); color: #fff; font-weight: 600; }
+    .status-pill { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--border); }
     .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
     .dot.running { background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.4s infinite; }
     @media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
     @keyframes pulse { 50% { opacity: 0.4; } }
-    main { display: grid; grid-template-columns: 400px 1fr; gap: 20px; padding: 24px; max-width: 1300px; margin: 0 auto; }
-    @media (max-width: 920px) { main { grid-template-columns: 1fr; } }
+    main { display: grid; grid-template-columns: 390px 1fr; gap: 20px; padding: 24px; max-width: 1400px; margin: 0 auto; }
+    @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
     .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
     .card h2 { margin: 0 0 16px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+    .card h2 .sub { text-transform: none; letter-spacing: 0; font-weight: 400; }
     label { display: block; font-size: 13px; margin-bottom: 6px; font-weight: 500; }
     .field { margin-bottom: 16px; }
     .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-    input, select { width: 100%; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border);
-      border-radius: 8px; color: var(--text); font-size: 14px; font-family: inherit; }
+    input, select { width: 100%; padding: 10px 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; font-family: inherit; }
     input[aria-invalid="true"] { border-color: var(--stop); }
-    input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible, circle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     .signals { display: flex; gap: 8px; }
-    .signals label { display: flex; align-items: center; gap: 7px; margin: 0; padding: 8px 12px; flex: 1;
-      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; font-weight: 500; }
+    .signals label { display: flex; align-items: center; gap: 7px; margin: 0; padding: 8px 12px; flex: 1; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); cursor: pointer; font-weight: 500; }
     .signals label:has(input:checked) { border-color: var(--accent); background: rgba(125,100,255,0.12); }
     .signals input { width: auto; }
     .actions { display: flex; gap: 12px; margin-top: 8px; }
@@ -47,22 +47,53 @@
     .btn-start { background: var(--accent); color: #fff; }
     .btn-start:not(:disabled):hover { background: var(--accent-hover); }
     .btn-stop { background: var(--stop); color: #fff; }
-    .chip { display: inline-block; margin: 4px 6px 0 0; padding: 3px 10px; font-size: 12px; border-radius: 999px;
-      background: var(--panel-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; font-weight: 500; }
-    .errors { background: rgba(248,81,73,0.1); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px;
-      margin-bottom: 16px; font-size: 13px; color: #ffc4c0; }
+    .btn-ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; font-size: 12px; font-weight: 500; }
+    .chip { display: inline-block; margin: 4px 6px 0 0; padding: 3px 10px; font-size: 12px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); cursor: pointer; font-weight: 500; }
+    .errors { background: rgba(248,81,73,0.1); border: 1px solid var(--stop); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; color: #ffc4c0; }
     .errors ul { margin: 4px 0 0; padding-left: 18px; }
-    .logs { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px;
-      font-family: ui-monospace, monospace; font-size: 12px; color: #b4c4d6; height: 420px; overflow-y: auto;
-      white-space: pre-wrap; word-break: break-word; margin: 0; }
+    .logs { background: #0a0d12; border: 1px solid var(--border); border-radius: 8px; padding: 14px; font-family: ui-monospace, monospace; font-size: 12px; color: #b4c4d6; height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; margin: 0; }
     .meta { font-size: 12px; color: var(--muted); margin-top: 10px; }
+    a { color: #a99bff; }
     [hidden] { display: none !important; }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+    .right-col { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+    /* Curve editor (same look as the k6 panel) */
+    .curve-svg { width: 100%; height: auto; display: block; touch-action: none; user-select: none; }
+    .curve-svg .plot-bg { fill: transparent; cursor: crosshair; }
+    .curve-svg.locked .plot-bg, .curve-svg.locked .pt { cursor: default; }
+    .curve-svg .gridline { stroke: var(--grid); stroke-dasharray: 3 4; }
+    .curve-svg .axis { stroke: var(--axis); }
+    .curve-svg .tick { fill: #7d8a9c; font-size: 10px; }
+    .curve-svg .line { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linejoin: round; }
+    .curve-svg .area { fill: var(--accent); opacity: 0.13; }
+    .curve-svg .pt { fill: var(--panel); stroke: var(--accent); stroke-width: 2; cursor: grab; }
+    .curve-svg .pt.active { fill: var(--accent); stroke: #fff; }
+    .curve-svg .tip-bg { fill: var(--panel-2); stroke: var(--axis); }
+    .curve-svg .tip { fill: var(--text); font-size: 11px; }
+    .curve-svg .progress { stroke: var(--ok); stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .curve-help { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+    .stages { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .stages th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11px; padding: 4px 6px; border-bottom: 1px solid var(--border); }
+    .stages td { padding: 4px 6px; border-bottom: 1px solid #1d2430; vertical-align: middle; }
+    .stages td.num { color: var(--muted); width: 22px; }
+    .stages td.over { color: var(--muted); white-space: nowrap; }
+    .stages input { padding: 5px 8px; font-size: 13px; }
+    .stages td.at input { width: 76px; } .stages td.vus input { width: 72px; }
+    .stages .del { background: none; border: none; color: var(--muted); padding: 4px 8px; font-size: 16px; }
+    .stages .del:not(:disabled):hover { color: var(--stop); }
+    .stages-wrap { max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #0a0d12; padding: 4px; }
+    .summary { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .table-tools { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
+    .table-tools .lbl { font-size: 12px; color: var(--muted); }
   </style>
 </head>
 <body>
   <header>
     <h1><span class="otlp">OTLP</span> Load Generator</h1>
+    <div class="modes" role="radiogroup" aria-label="Load mode">
+      <label><input type="radio" name="mode" value="constant" checked /><span>Constant</span></label>
+      <label><input type="radio" name="mode" value="curve" /><span>Curve</span></label>
+    </div>
     <span class="status-pill" role="status" aria-live="polite"><span id="dot" class="dot" aria-hidden="true"></span><span id="statusText">Connecting…</span></span>
   </header>
 
@@ -78,6 +109,12 @@
           <div class="hint">This panel requires the token set in OTEL_PANEL_TOKEN on the instance.</div>
         </div>
 
+        <div class="field" id="profileField" hidden>
+          <label for="profile">Profile</label>
+          <select id="profile"><option value="">— custom —</option></select>
+          <div class="hint">Pre-made runs set up for you. Picking one fills the form; you can still tweak it.</div>
+        </div>
+
         <div class="field">
           <label for="endpoint">OTLP endpoint (host:port)</label>
           <input id="endpoint" placeholder="otel.example.com:443" required aria-describedby="epHint" />
@@ -88,7 +125,7 @@
         <div class="row">
           <div class="field">
             <label for="protocol">Protocol</label>
-            <select id="protocol"><option value="grpc">gRPC</option><option value="http">HTTP</option></select>
+            <select id="protocol"><option value="http">HTTP</option><option value="grpc">gRPC</option></select>
           </div>
           <div class="field">
             <label for="insecure">TLS</label>
@@ -106,29 +143,44 @@
           <div class="hint">Each selected signal runs as its own telemetrygen container, in parallel.</div>
         </div>
 
-        <div class="row">
-          <div class="field">
-            <label for="workers">Workers</label>
-            <input id="workers" type="number" min="1" value="4" required aria-describedby="wHint" />
-            <div class="hint" id="wHint"></div>
-          </div>
+        <div class="field">
+          <label for="workers">Workers</label>
+          <input id="workers" type="number" min="1" value="4" required aria-describedby="wHint" />
+          <div class="hint" id="wHint"></div>
+        </div>
+
+        <!-- Constant mode -->
+        <div class="row constant-only">
           <div class="field">
             <label for="rate">Rate (per s)</label>
             <input id="rate" type="number" min="1" value="200" aria-describedby="rHint" />
-            <div class="hint" id="rHint">traces/logs only; metrics ignores it.</div>
+            <div class="hint" id="rHint">traces/logs; metrics ignores it.</div>
+          </div>
+          <div class="field">
+            <label for="duration">Duration</label>
+            <input id="duration" value="10m" aria-describedby="dHint" />
+            <div class="hint" id="dHint">e.g. 30s, 5m, 1h</div>
           </div>
         </div>
 
-        <div class="field">
-          <label for="duration">Duration</label>
-          <input id="duration" value="10m" required aria-describedby="dHint" />
-          <div class="hint" id="dHint">e.g. 30s, 5m, 1h. Longer than the scale-out cooldown so you can see it scale.</div>
-          <div>
-            <span class="chip" data-dur="1m">1m</span>
-            <span class="chip" data-dur="5m">5m</span>
-            <span class="chip" data-dur="10m">10m</span>
-            <span class="chip" data-dur="30m">30m</span>
+        <!-- Curve mode: stages table (mirrors the graph) -->
+        <div class="field curve-only" hidden>
+          <label id="stagesLabel">Load profile over time</label>
+          <div class="stages-wrap">
+            <table class="stages" aria-labelledby="stagesLabel">
+              <thead><tr><th>#</th><th>At</th><th>Rate</th><th>Ramp</th><th><span class="sr-only">Remove</span></th></tr></thead>
+              <tbody id="stageRows"></tbody>
+            </table>
           </div>
+          <div class="table-tools">
+            <button type="button" class="btn-ghost" id="addPoint">+ Add point</button>
+            <span class="lbl">Presets:</span>
+            <button type="button" class="chip" data-preset="ramp">ramp</button>
+            <button type="button" class="chip" data-preset="spike">spike</button>
+            <button type="button" class="chip" data-preset="step">step</button>
+            <button type="button" class="chip" data-preset="soak">soak</button>
+          </div>
+          <div class="summary" id="curveSummary" aria-live="polite"></div>
         </div>
 
         <div class="actions">
@@ -139,10 +191,20 @@
       <div class="meta" id="meta"></div>
     </section>
 
-    <section class="card" aria-labelledby="out-title">
-      <h2 id="out-title">Run output</h2>
-      <pre id="logs" class="logs" tabindex="0" aria-label="telemetrygen output">No run yet.</pre>
-    </section>
+    <div class="right-col">
+      <section class="card curve-only" aria-labelledby="curve-title" hidden>
+        <h2 id="curve-title">Load curve <span class="sub">— click to add a point, drag to shape it</span></h2>
+        <svg id="curve" class="curve-svg" viewBox="0 0 640 280" role="img" aria-labelledby="curveDesc">
+          <desc id="curveDesc">Request rate over time. The same points are editable in the table.</desc>
+        </svg>
+        <p class="curve-help">Drag a point to move it, double-click to remove it. Each segment runs telemetrygen at the segment's mean rate for its length, then the next segment starts — that is the ramp.</p>
+      </section>
+
+      <section class="card" aria-labelledby="out-title">
+        <h2 id="out-title">Run output</h2>
+        <pre id="logs" class="logs" tabindex="0" aria-label="telemetrygen output">No run yet.</pre>
+      </section>
+    </div>
   </main>
 
   <script>
@@ -151,22 +213,29 @@
       errors: $("errors"), logs: $("logs"), meta: $("meta"), token: $("token"),
       endpoint: $("endpoint"), protocol: $("protocol"), insecure: $("insecure"),
       workers: $("workers"), rate: $("rate"), duration: $("duration") };
+    const SVGNS = "http://www.w3.org/2000/svg";
 
     let running = null;
-    let limits = { maxWorkers: 50, maxDurationSeconds: 3600 };
+    let limits = { maxWorkers: 50, maxDurationSeconds: 3600, maxPoints: 50 };
+    let mode = localStorage.getItem("otelPanelMode") === "curve" ? "curve" : "constant";
+    let profiles = [];
+    let configLoaded = false;
+    let runStartedAt = null, runCurveTotal = 0;
     els.token.value = sessionStorage.getItem("otelPanelToken") || "";
+
+    // ---------- helpers ----------
+    function fmtDur(s) { s = Math.round(s); if (s === 0) return "0s"; const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60; return (h?h+"h":"")+(m?m+"m":"")+(sec?sec+"s":""); }
+    function parseDur(t) { t=String(t).trim(); if (/^\d+$/.test(t)) return Number(t); const m=/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(t); if(!m||t==="")return NaN; return Number(m[1]||0)*3600+Number(m[2]||0)*60+Number(m[3]||0); }
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
     function showErrors(list) {
       els.errors.replaceChildren();
       if (!list || !list.length) { els.errors.hidden = true; return; }
-      const title = document.createElement("strong");
-      title.textContent = "Could not complete the request:";
+      const t = document.createElement("strong"); t.textContent = "Could not complete the request:";
       const ul = document.createElement("ul");
       for (const e of list) { const li = document.createElement("li"); li.textContent = e; ul.append(li); }
-      els.errors.append(title, ul);
-      els.errors.hidden = false;
+      els.errors.append(t, ul); els.errors.hidden = false;
     }
-
     async function api(path, options = {}) {
       const headers = { ...(options.headers || {}) };
       if (els.token.value) headers["x-panel-token"] = els.token.value;
@@ -175,80 +244,206 @@
       const data = await r.json().catch(() => ({}));
       return { ok: r.ok, status: r.status, data };
     }
+    const selectedSignals = () => [...document.querySelectorAll(".sig:checked")].map((c) => c.value);
+    function setSignals(list) { document.querySelectorAll(".sig").forEach((c) => { c.checked = (list || []).includes(c.value); }); }
 
-    function selectedSignals() {
-      return [...document.querySelectorAll(".sig:checked")].map((c) => c.value);
+    // ---------- mode ----------
+    function applyMode() {
+      document.querySelectorAll(".constant-only").forEach((el) => { el.hidden = mode !== "constant"; });
+      document.querySelectorAll(".curve-only").forEach((el) => { el.hidden = mode !== "curve"; });
+      document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
+      if (mode === "curve") renderCurve();
+    }
+    document.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => {
+      mode = r.value; localStorage.setItem("otelPanelMode", mode); showErrors([]); applyMode();
+    }));
+
+    // ---------- curve model (rate over time; same editor as k6, VUs -> rate) ----------
+    let points = [];
+    let activeIndex = -1, axisSeconds = 360, axisRate = 500, drag = null;
+    const snapStep = () => (axisSeconds <= 120 ? 1 : axisSeconds <= 900 ? 5 : 15);
+    function niceCeil(v){const s=[50,100,200,300,500,750,1000,1500,2000,3000,5000,10000];return s.find(x=>x>=v)||Math.ceil(v/1000)*1000;}
+    function niceTime(v){const s=[60,120,180,300,360,480,600,900,1200,1800,2700,3600,5400,7200];return s.find(x=>x>=v)||Math.ceil(v/3600)*3600;}
+    function fitAxes(){const lastT=points.length?points[points.length-1].t:0;axisSeconds=Math.min(limits.maxDurationSeconds,niceTime(Math.max(60,lastT*1.2)));if(axisSeconds<lastT)axisSeconds=lastT;const peak=points.length?Math.max(...points.map(p=>p.vus)):0;axisRate=niceCeil(Math.max(50,peak*1.3));if(axisRate<peak)axisRate=peak;}
+
+    function preset(name) {
+      const R = 500, L = Math.min(name === "soak" ? 1800 : 600, limits.maxDurationSeconds);
+      const rt = (x) => Math.round(x / 5) * 5, r = Math.round;
+      const shapes = {
+        ramp:  [[0,0],[rt(L/3),R],[rt(L*5/6),R],[rt(L),0]],
+        spike: [[0,R*0.1],[rt(L*0.3),R*0.1],[rt(L*0.4),R],[rt(L*0.5),R*0.1],[rt(L),R*0.1]],
+        step:  [[0,R*0.25],[rt(L/4),R*0.25],[rt(L/4)+1,R*0.5],[rt(L/2),R*0.5],[rt(L/2)+1,R*0.75],[rt(L*3/4),R*0.75],[rt(L*3/4)+1,R],[rt(L),R]],
+        soak:  [[0,0],[rt(Math.min(120,L*0.1)),R*0.5],[rt(L-Math.min(120,L*0.1)),R*0.5],[rt(L),0]],
+      };
+      points = shapes[name].map(([t,v]) => ({ t: Math.min(t, limits.maxDurationSeconds), vus: r(v) }));
+      activeIndex = -1; fitAxes(); renderCurve();
+    }
+
+    const svg = $("curve");
+    const G = { L: 50, R: 14, T: 14, B: 34, W: 640, H: 280 };
+    const plotW = () => G.W - G.L - G.R, plotH = () => G.H - G.T - G.B;
+    const xOf = (t) => G.L + (t / axisSeconds) * plotW();
+    const yOf = (v) => G.T + plotH() - (v / axisRate) * plotH();
+    const tOf = (x) => ((x - G.L) / plotW()) * axisSeconds;
+    const vOf = (y) => ((G.T + plotH() - y) / plotH()) * axisRate;
+    function el(name, attrs = {}, text) { const n = document.createElementNS(SVGNS, name); for (const [k,v] of Object.entries(attrs)) n.setAttribute(k,v); if (text!==undefined) n.textContent=text; return n; }
+
+    function renderCurve() {
+      const desc = svg.querySelector("desc"); svg.replaceChildren(desc);
+      svg.classList.toggle("locked", !!running);
+      for (let i=0;i<=5;i++){const v=(axisRate/5)*i,y=yOf(v);svg.append(el("line",{x1:G.L,y1:y,x2:G.W-G.R,y2:y,class:i===0?"axis":"gridline"}));svg.append(el("text",{x:G.L-6,y:y+3,class:"tick","text-anchor":"end"},String(Math.round(v))));}
+      const tickStep=[5,10,15,30,60,120,300,600,900,1800,3600].find(s=>axisSeconds/s<=8)||3600;
+      for(let t=0;t<=axisSeconds+0.001;t+=tickStep){const x=xOf(t);if(t>0)svg.append(el("line",{x1:x,y1:G.T,x2:x,y2:G.T+plotH(),class:"gridline"}));svg.append(el("text",{x,y:G.H-G.B+16,class:"tick","text-anchor":"middle"},fmtDur(t)));}
+      svg.append(el("line",{x1:G.L,y1:G.T,x2:G.L,y2:G.T+plotH(),class:"axis"}));
+      svg.append(el("text",{x:12,y:G.T+plotH()/2,class:"tick","text-anchor":"middle",transform:`rotate(-90 12 ${G.T+plotH()/2})`},"rate/s"));
+      const bg=el("rect",{x:G.L,y:G.T,width:plotW(),height:plotH(),class:"plot-bg"});bg.addEventListener("pointerdown",onBackgroundDown);svg.append(bg);
+      if(points.length){const coords=points.map(p=>`${xOf(p.t)},${yOf(p.vus)}`).join(" ");const base=yOf(0);svg.append(el("polygon",{points:`${xOf(points[0].t)},${base} ${coords} ${xOf(points[points.length-1].t)},${base}`,class:"area"}));svg.append(el("polyline",{points:coords,class:"line"}));}
+      if(running&&runStartedAt&&runCurveTotal){const elapsed=Math.min((Date.now()-runStartedAt)/1000,runCurveTotal);if(elapsed<=axisSeconds){const x=xOf(elapsed);svg.append(el("line",{x1:x,y1:G.T,x2:x,y2:G.T+plotH(),class:"progress"}));}}
+      points.forEach((p,i)=>{const c=el("circle",{cx:xOf(p.t),cy:yOf(p.vus),r:i===activeIndex?7:5.5,class:"pt"+(i===activeIndex?" active":""),tabindex:"0",role:"slider","aria-label":`Point ${i+1}: ${p.vus}/s at ${fmtDur(p.t)}`});c.addEventListener("pointerdown",(ev)=>onPointDown(ev,i));c.addEventListener("keydown",(ev)=>onPointKey(ev,i));c.addEventListener("focus",()=>{if(activeIndex!==i){activeIndex=i;renderCurve();svg.querySelectorAll(".pt")[i]?.focus();}});svg.append(c);});
+      if(activeIndex>=0&&points[activeIndex]){const p=points[activeIndex];const label=`${fmtDur(p.t)} · ${p.vus}/s`;const w=label.length*6.2+14;let x=xOf(p.t)-w/2,y=yOf(p.vus)-32;x=clamp(x,G.L,G.W-G.R-w);if(y<2)y=yOf(p.vus)+12;svg.append(el("rect",{x,y,width:w,height:20,rx:5,class:"tip-bg"}));svg.append(el("text",{x:x+w/2,y:y+14,class:"tip","text-anchor":"middle"},label));}
+      renderTable();
+    }
+    function svgPoint(ev){const pt=svg.createSVGPoint();pt.x=ev.clientX;pt.y=ev.clientY;return pt.matrixTransform(svg.getScreenCTM().inverse());}
+    function placePoint(i,t,v){const step=snapStep();let nt=i===0?0:Math.round(t/step)*step;if(i>0){const lo=points[i-1].t+1;const hi=i<points.length-1?points[i+1].t-1:limits.maxDurationSeconds;nt=clamp(nt,lo,Math.min(hi,axisSeconds));}points[i]={t:Math.round(nt),vus:clamp(Math.round(v),0,100000)};}
+    function onPointDown(ev,i){if(running)return;ev.preventDefault();activeIndex=i;drag={i,moved:false};svg.setPointerCapture(ev.pointerId);svg.querySelectorAll(".pt").forEach((c,k)=>c.classList.toggle("active",k===i));}
+    function onBackgroundDown(ev){if(running||points.length>=limits.maxPoints)return;const p=svgPoint(ev);const step=snapStep();const t=Math.round(clamp(tOf(p.x),0,axisSeconds)/step)*step;if(t<=0||points.some(q=>q.t===t))return;const v=clamp(Math.round(vOf(p.y)),0,100000);let idx=points.findIndex(q=>q.t>t);if(idx===-1)idx=points.length;points.splice(idx,0,{t,vus:v});activeIndex=idx;drag={i:idx};svg.setPointerCapture(ev.pointerId);renderCurve();}
+    svg.addEventListener("pointermove",(ev)=>{if(!drag)return;const p=svgPoint(ev);placePoint(drag.i,tOf(p.x),vOf(p.y));drag.moved=true;renderCurve();});
+    function endDrag(){if(!drag)return;const moved=drag.moved;drag=null;if(!moved)return;fitAxes();renderCurve();}
+    svg.addEventListener("pointerup",endDrag);svg.addEventListener("pointercancel",endDrag);
+    svg.addEventListener("dblclick",(ev)=>{const p=svgPoint(ev);const hit=points.findIndex(q=>Math.hypot(xOf(q.t)-p.x,yOf(q.vus)-p.y)<=10);if(hit>0)removePoint(hit);});
+    function removePoint(i){if(running||i===0||points.length<=2)return;points.splice(i,1);activeIndex=Math.min(i,points.length-1);fitAxes();renderCurve();}
+    function onPointKey(ev,i){if(running)return;const big=ev.shiftKey;const p=points[i];let h=true;if(ev.key==="ArrowUp")placePoint(i,p.t,p.vus+(big?50:10));else if(ev.key==="ArrowDown")placePoint(i,p.t,p.vus-(big?50:10));else if(ev.key==="ArrowRight")placePoint(i,p.t+snapStep()*(big?6:1),p.vus);else if(ev.key==="ArrowLeft")placePoint(i,p.t-snapStep()*(big?6:1),p.vus);else if(ev.key==="Delete"||ev.key==="Backspace")removePoint(i);else h=false;if(!h)return;ev.preventDefault();fitAxes();renderCurve();svg.querySelectorAll(".pt")[Math.min(i,points.length-1)]?.focus();}
+
+    function renderTable() {
+      const body = $("stageRows");
+      if (body.contains(document.activeElement)) { renderSummary(); return; }
+      body.replaceChildren();
+      points.forEach((p,i)=>{
+        const tr=document.createElement("tr");
+        const num=document.createElement("td");num.className="num";num.textContent=String(i+1);
+        const at=document.createElement("td");at.className="at";const atIn=document.createElement("input");atIn.value=fmtDur(p.t);atIn.disabled=i===0||!!running;atIn.addEventListener("change",()=>editTime(i,atIn));at.append(atIn);
+        const vus=document.createElement("td");vus.className="vus";const vIn=document.createElement("input");vIn.type="number";vIn.min="0";vIn.value=String(p.vus);vIn.disabled=!!running;vIn.addEventListener("change",()=>editVus(i,vIn));vus.append(vIn);
+        const over=document.createElement("td");over.className="over";over.textContent=i===0?"start":`→ ${p.vus}/s in ${fmtDur(p.t-points[i-1].t)}`;
+        const del=document.createElement("td");const b=document.createElement("button");b.type="button";b.className="del";b.textContent="×";b.disabled=i===0||points.length<=2||!!running;b.addEventListener("click",()=>removePoint(i));del.append(b);
+        tr.append(num,at,vus,over,del);body.append(tr);
+      });
+      renderSummary();
+    }
+    function editTime(i,input){const t=parseDur(input.value);const prev=points[i-1].t,next=i<points.length-1?points[i+1].t:Infinity;const ok=Number.isFinite(t)&&t>prev&&t<next&&t<=limits.maxDurationSeconds;input.setAttribute("aria-invalid",ok?"false":"true");if(!ok){showErrors([`Point ${i+1}: time must be after ${fmtDur(prev)}`+(next!==Infinity?` and before ${fmtDur(next)}`:"")+`.`]);return;}showErrors([]);points[i].t=Math.round(t);input.blur();fitAxes();renderCurve();}
+    function editVus(i,input){const v=Number(input.value);const ok=Number.isInteger(v)&&v>=0&&v<=100000;input.setAttribute("aria-invalid",ok?"false":"true");if(!ok){showErrors([`Point ${i+1}: rate must be a whole number ≥ 0.`]);return;}showErrors([]);points[i].vus=v;input.blur();fitAxes();renderCurve();}
+    function renderSummary(){const total=points.length?points[points.length-1].t:0;const peak=points.length?Math.max(...points.map(p=>p.vus)):0;$("curveSummary").textContent=`Total ${fmtDur(total)} · peak ${peak}/s · ${points.length}/${limits.maxPoints} points`;}
+    $("addPoint").addEventListener("click",()=>{if(running||points.length>=limits.maxPoints)return;const last=points[points.length-1];const t=Math.min(last.t+60,limits.maxDurationSeconds);if(t<=last.t)return;points.push({t,vus:last.vus});activeIndex=points.length-1;fitAxes();renderCurve();});
+    document.querySelectorAll("[data-preset]").forEach((b)=>b.addEventListener("click",()=>{if(!running)preset(b.dataset.preset);}));
+
+    // ---------- profiles (N2) ----------
+    function fillProfileDropdown() {
+      const sel = $("profile");
+      sel.replaceChildren();
+      const custom = document.createElement("option"); custom.value = ""; custom.textContent = "— custom —"; sel.append(custom);
+      for (const p of profiles) { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.append(o); }
+      $("profileField").hidden = profiles.length === 0;
+    }
+    function applyProfile(p) {
+      if (!p) return;
+      if (p.endpoint) els.endpoint.value = p.endpoint;
+      if (p.protocol) els.protocol.value = p.protocol;
+      if (p.insecure !== undefined) els.insecure.value = String(p.insecure);
+      if (p.signals) setSignals(p.signals);
+      if (p.workers) els.workers.value = p.workers;
+      if (p.mode === "curve" && Array.isArray(p.points) && p.points.length >= 2) {
+        mode = "curve"; localStorage.setItem("otelPanelMode", "curve");
+        points = p.points.map((q) => ({ t: Number(q.t), vus: Number(q.vus) })); fitAxes();
+      } else {
+        mode = "constant"; localStorage.setItem("otelPanelMode", "constant");
+        if (p.rate) els.rate.value = p.rate; if (p.duration) els.duration.value = p.duration;
+      }
+      applyMode();
+    }
+    $("profile").addEventListener("change", (e) => {
+      const p = profiles.find((x) => x.name === e.target.value);
+      applyProfile(p);
+    });
+
+    // ---------- defaults (N1) ----------
+    function applyDefaults(d) {
+      if (!d) return;
+      if (d.endpoint && !els.endpoint.value) els.endpoint.value = d.endpoint;
+      if (d.protocol) els.protocol.value = d.protocol;
+      if (d.insecure !== undefined) els.insecure.value = String(d.insecure);
+      if (d.signals) setSignals(d.signals);
+      if (d.workers) els.workers.value = d.workers;
+      if (d.rate) els.rate.value = d.rate;
+      if (d.duration) els.duration.value = d.duration;
+      if (d.mode === "curve") { mode = "curve"; localStorage.setItem("otelPanelMode", "curve"); }
     }
 
     function renderSuggestions(list) {
-      const box = $("suggestions");
-      box.replaceChildren();
-      for (const s of (list || [])) {
-        const chip = document.createElement("span");
-        chip.className = "chip"; chip.textContent = s;
-        chip.addEventListener("click", () => { els.endpoint.value = s; });
-        box.append(chip);
-      }
+      const box = $("suggestions"); box.replaceChildren();
+      for (const s of (list || [])) { const chip = document.createElement("span"); chip.className="chip"; chip.textContent=s; chip.addEventListener("click",()=>{els.endpoint.value=s;}); box.append(chip); }
     }
 
-    document.querySelectorAll(".chip[data-dur]").forEach((c) =>
-      c.addEventListener("click", () => { els.duration.value = c.dataset.dur; }));
-
+    // ---------- status / config ----------
     function setRunning(isRunning) {
       running = isRunning;
-      els.start.disabled = isRunning;
-      els.stop.disabled = !isRunning;
-      els.dot.classList.toggle("running", isRunning);
-      els.status.textContent = isRunning ? "Running" : "Idle";
+      els.start.disabled = isRunning; els.stop.disabled = !isRunning;
+      els.dot.className = "dot" + (isRunning ? " running" : "");
+      $("addPoint").disabled = isRunning;
+      if (!isRunning) runStartedAt = null;
+      if (mode === "curve") renderCurve();
+    }
+
+    async function loadConfig() {
+      try {
+        const { ok, data } = await api("/api/config");
+        if (!ok) return;
+        configLoaded = true;
+        if (data.limits) { limits = { ...limits, ...data.limits }; els.workers.max = limits.maxWorkers; $("wHint").textContent = `1 to ${limits.maxWorkers}`; }
+        profiles = data.profiles || []; fillProfileDropdown();
+        renderSuggestions(data.suggestedEndpoints);
+        applyDefaults(data.defaults);
+        if (!points.length) preset("ramp");
+        applyMode();
+      } catch (e) { if (e.status === 401) els.status.textContent = "Token required"; }
     }
 
     async function refresh() {
       try {
-        const { ok, data } = await api("/api/status");
-        if (!ok) return;
-        if (data.limits) {
-          limits = data.limits;
-          $("wHint").textContent = `1 to ${limits.maxWorkers}`;
-          els.workers.max = limits.maxWorkers;
-        }
-        if (!$("suggestions").children.length) renderSuggestions(data.suggestedEndpoints);
-        setRunning(!!data.running);
-        if (data.logs) els.logs.textContent = data.logs;
-        if (data.signals) {
-          els.meta.textContent = data.signals
-            .filter((s) => s.present)
-            .map((s) => `${s.signal}: ${s.running ? "running" : (s.lastRun ? "exit " + s.lastRun.exitCode : "idle")}`)
-            .join("  ·  ");
-        }
-      } catch (e) { if (e.status !== 401) els.status.textContent = "Panel unreachable"; }
+        if (!configLoaded) await loadConfig();
+        const { data: s } = await api("/api/status");
+        setRunning(!!s.running);
+        els.status.textContent = s.running ? "Running" : "Idle";
+        if (s.scheduler) {
+          runCurveTotal = s.scheduler.totalSeconds || runCurveTotal;
+          els.meta.textContent = `phase ${s.scheduler.phase}/${s.scheduler.totalPhases} · elapsed ${fmtDur(s.scheduler.elapsedSeconds)}${s.scheduler.totalSeconds?` / ${fmtDur(s.scheduler.totalSeconds)}`:""}`;
+        } else { els.meta.textContent = ""; }
+        if (s.logs) { const atBottom = els.logs.scrollTop + els.logs.clientHeight >= els.logs.scrollHeight - 20; els.logs.textContent = s.logs; if (atBottom) els.logs.scrollTop = els.logs.scrollHeight; }
+        if (s.running && mode === "curve" && runStartedAt && !drag) renderCurve();
+      } catch (e) { els.status.textContent = e.status === 401 ? "Token required" : "Unreachable"; }
     }
 
+    document.querySelectorAll(".chip[data-dur]").forEach((c)=>c.addEventListener("click",()=>{els.duration.value=c.dataset.dur;}));
+
     $("form").addEventListener("submit", async (ev) => {
-      ev.preventDefault();
-      showErrors([]);
+      ev.preventDefault(); showErrors([]);
       sessionStorage.setItem("otelPanelToken", els.token.value || "");
-      const body = {
-        endpoint: els.endpoint.value.trim(),
-        protocol: els.protocol.value,
-        insecure: els.insecure.value === "true",
-        signals: selectedSignals(),
-        workers: Number(els.workers.value),
-        rate: Number(els.rate.value),
-        duration: els.duration.value.trim(),
-      };
-      const { ok, data } = await api("/api/start", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-      });
-      if (!ok) { showErrors(data.errors || ["Could not start the run."]); return; }
-      setRunning(true);
-      refresh();
+      const common = { endpoint: els.endpoint.value.trim(), protocol: els.protocol.value, insecure: els.insecure.value === "true", signals: selectedSignals(), workers: Number(els.workers.value) };
+      const payload = mode === "curve"
+        ? { ...common, mode: "curve", points: points.map((p) => ({ t: p.t, vus: p.vus })) }
+        : { ...common, mode: "constant", rate: Number(els.rate.value), duration: els.duration.value.trim() };
+      els.start.disabled = true;
+      try {
+        const { ok, data } = await api("/api/start", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+        if (!ok) { showErrors(data.errors || ["Could not start the run."]); els.start.disabled = false; return; }
+        els.logs.textContent = "Starting telemetrygen…";
+        if (mode === "curve") { runStartedAt = Date.now(); runCurveTotal = data.config?.totalSeconds || 0; }
+        setRunning(true);
+        setTimeout(refresh, 1500); setTimeout(refresh, 4000);
+      } catch (e) { showErrors([e.status === 401 ? "Enter the access token and try again." : "Network error: " + e.message]); els.start.disabled = false; }
     });
 
-    els.stop.addEventListener("click", async () => {
-      await api("/api/stop", { method: "POST" });
-      refresh();
-    });
+    els.stop.addEventListener("click", async () => { els.stop.disabled = true; try { await api("/api/stop", { method: "POST" }); } catch (e) {} refresh(); });
 
+    applyMode();
     refresh();
     setInterval(refresh, 3000);
   </script>
