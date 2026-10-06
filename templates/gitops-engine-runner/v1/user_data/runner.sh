@@ -16,10 +16,12 @@
 # (the engine's .mjs scripts) and Docker with buildx (the ECR image seed builds with
 # --provenance=false).
 #
-# It runs on amd64 and on arm64 (Graviton). On arm64, Docker builds for linux/amd64
-# through QEMU: the ECR image seed runs a plain `docker build`, which builds for the
-# machine it runs on, and the image has to be the one the hosted runner (amd64) builds,
-# because a function or task that does not choose arm64 cannot start any other.
+# It runs on amd64 and on arm64 (Graviton). On arm64 it installs QEMU: the ECR image
+# seed builds for the architecture of what runs the image, which is x86_64 for every
+# function or task that does not choose arm64. It also sets DOCKER_DEFAULT_PLATFORM to
+# linux/amd64 for the jobs, for Terraform compiled before the generator chose the
+# platform: that runs a plain `docker build`, which builds for the machine it runs on,
+# and the hosted runner it was written for is amd64.
 #
 # Every download is pinned and checked against a SHA-256 before it runs: what is
 # installed here runs in every job, with the job's OIDC token within reach. The versions
@@ -216,7 +218,7 @@ ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/struct8-runner/job-started.sh
 ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/struct8-runner/job-completed.sh
 ENV
 grep -q '^LANG=' .env || echo 'LANG=C.UTF-8' >> .env
-# The platform every job's `docker build` targets; empty on amd64.
+# The platform a `docker build` without --platform targets in every job; empty on amd64.
 if [ -n "${DOCKER_PLATFORM:-}" ]; then
   grep -q '^DOCKER_DEFAULT_PLATFORM=' .env 2>/dev/null \
     || echo "DOCKER_DEFAULT_PLATFORM=$DOCKER_PLATFORM" >> .env
