@@ -16,10 +16,16 @@
 # (the engine's .mjs scripts) and Docker with buildx (the ECR image seed builds with
 # --provenance=false).
 #
+# It runs on amd64 and on arm64 (Graviton). On arm64, Docker builds for linux/amd64
+# through QEMU: the ECR image seed runs a plain `docker build`, which builds for the
+# machine it runs on, and the image has to be the one the hosted runner (amd64) builds,
+# because a function or task that does not choose arm64 cannot start any other.
+#
 # Every download is pinned and checked against a SHA-256 before it runs: what is
 # installed here runs in every job, with the job's OIDC token within reach. The versions
-# are the ones on the hosted image of 2026-09-27. The AWS CLI hash was taken after
-# checking the zip against the AWS CLI team's PGP signature (key FB5DB77F...4672475C).
+# are the ones on the hosted image of 2026-09-27, with one hash per architecture. The
+# AWS CLI hashes were taken after checking each zip against the AWS CLI team's PGP
+# signature (key FB5DB77F...4672475C).
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
@@ -32,14 +38,34 @@ TOKEN_PARAMETER=$(sed -n 's/^AWS_SSM_PARAMETER_NAME_[^=]*="\(.*\)"$/\1/p' "$VARS
 RUNNER_LABELS=${RUNNER_LABELS:-struct8-engine}
 
 RUNNER_VERSION=2.337.0
-RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
 NODE_VERSION=22.23.3
-NODE_SHA256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
 GH_VERSION=2.101.0
-GH_SHA256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
 AWSCLI_VERSION=2.37.4
-AWSCLI_SHA256=0c59444563f4df735eeb5481f6165f95dae546c33761760d8be9855d5cfe2d12
 DOCKER_KEY_FINGERPRINT=9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+
+# Each project spells the architecture its own way; dpkg's spelling is the one apt and
+# the GitHub CLI use.
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+  amd64)
+    RUNNER_ARCH=x64 NODE_ARCH=x64 AWSCLI_ARCH=x86_64
+    RUNNER_SHA256=70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613
+    NODE_SHA256=df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de
+    GH_SHA256=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+    AWSCLI_SHA256=0c59444563f4df735eeb5481f6165f95dae546c33761760d8be9855d5cfe2d12
+    ;;
+  arm64)
+    RUNNER_ARCH=arm64 NODE_ARCH=arm64 AWSCLI_ARCH=aarch64
+    RUNNER_SHA256=9b1dc70626422526e3c94767cf024896beb15da5342a3f4819bf2feac13e0393
+    NODE_SHA256=a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f
+    GH_SHA256=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
+    AWSCLI_SHA256=869aa72b9bdb931a9158d0cea9f4f0dc3f7aecf24ea1552da549b87907d28ab2
+    ;;
+  *)
+    echo "Unsupported architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
 
 apt_get() { apt-get -o DPkg::Lock::Timeout=600 -y -q "$@"; }
 fetch() {  # url sha256 file
@@ -71,22 +97,34 @@ gpg --show-keys --with-colons /etc/apt/keyrings/docker.asc \
   | grep -q "^fpr:*${DOCKER_KEY_FINGERPRINT}:" \
   || { echo "Docker's apt key does not have the expected fingerprint" >&2; exit 1; }
 . /etc/os-release
-echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+echo "deb [arch=${ARCH} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
   > /etc/apt/sources.list.d/docker.list
 apt_get update
 apt_get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin
 
-fetch "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+# amd64 builds on arm64 (see the header). The package registers its emulators with the
+# F flag, which loads the emulator when it is registered, so it also runs inside the
+# build's containers. Without the registration every amd64 build fails, so stop here.
+DOCKER_PLATFORM=""
+if [ "$ARCH" = arm64 ]; then
+  apt_get install --no-install-recommends qemu-user-static
+  systemctl restart systemd-binfmt
+  [ -e /proc/sys/fs/binfmt_misc/qemu-x86_64 ] \
+    || { echo "QEMU is not registered for x86_64, so Docker cannot build amd64 images." >&2; exit 1; }
+  DOCKER_PLATFORM=linux/amd64
+fi
+
+fetch "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
   "$NODE_SHA256" "$tmp/node.tar.xz"
 tar -xJf "$tmp/node.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
   --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md
 
-fetch "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+fetch "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" \
   "$GH_SHA256" "$tmp/gh.tar.gz"
 tar -xzf "$tmp/gh.tar.gz" -C "$tmp"
-install -m 0755 "$tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh
+install -m 0755 "$tmp/gh_${GH_VERSION}_linux_${ARCH}/bin/gh" /usr/local/bin/gh
 
-fetch "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" \
+fetch "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}-${AWSCLI_VERSION}.zip" \
   "$AWSCLI_SHA256" "$tmp/awscli.zip"
 unzip -q "$tmp/awscli.zip" -d "$tmp"
 "$tmp/aws/install" --update
@@ -110,7 +148,7 @@ echo '$nrconf{override_rc}{qr(^actions\.runner\.)} = 0;' \
   > /etc/needrestart/conf.d/struct8-runner.conf
 
 RUNNER_DIR=/home/runner/actions-runner
-fetch "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
+fetch "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-${RUNNER_ARCH}-${RUNNER_VERSION}.tar.gz" \
   "$RUNNER_SHA256" "$tmp/runner.tar.gz"
 install -d -o runner -g runner "$RUNNER_DIR" /home/runner/work
 tar -xzf "$tmp/runner.tar.gz" -C "$RUNNER_DIR"
@@ -125,8 +163,8 @@ if [[ "$REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] && [ "$REPOSITORY" !
 fi
 
 install -d -m 0755 /opt/struct8-runner
-printf "RUNNER_URL='%s'\nRUNNER_LABELS='%s'\nTOKEN_PARAMETER='%s'\nAWS_REGION='%s'\n" \
-  "$RUNNER_URL" "$RUNNER_LABELS" "$TOKEN_PARAMETER" "$AWS_REGION" \
+printf "RUNNER_URL='%s'\nRUNNER_LABELS='%s'\nTOKEN_PARAMETER='%s'\nAWS_REGION='%s'\nDOCKER_PLATFORM='%s'\n" \
+  "$RUNNER_URL" "$RUNNER_LABELS" "$TOKEN_PARAMETER" "$AWS_REGION" "$DOCKER_PLATFORM" \
   > /opt/struct8-runner/runner.conf
 
 cat > /opt/struct8-runner/job-started.sh <<'HOOK'
@@ -178,6 +216,11 @@ ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/struct8-runner/job-started.sh
 ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/opt/struct8-runner/job-completed.sh
 ENV
 grep -q '^LANG=' .env || echo 'LANG=C.UTF-8' >> .env
+# The platform every job's `docker build` targets; empty on amd64.
+if [ -n "${DOCKER_PLATFORM:-}" ]; then
+  grep -q '^DOCKER_DEFAULT_PLATFORM=' .env 2>/dev/null \
+    || echo "DOCKER_DEFAULT_PLATFORM=$DOCKER_PLATFORM" >> .env
+fi
 ./svc.sh install runner
 ./svc.sh start
 REGISTER
