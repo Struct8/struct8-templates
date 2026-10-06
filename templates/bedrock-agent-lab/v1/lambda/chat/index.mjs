@@ -5,7 +5,9 @@
 //   { "question": "...", "sessionId": "...", "actorId": "..." }
 // Only "question" is required. The same sessionId continues a conversation;
 // the same actorId is the same customer, whose session summaries the memory
-// keeps across sessions.
+// keeps across sessions. A question without an actorId is filed under an actor
+// of its own session: the harness would otherwise use the actor "default",
+// shared by every caller of this public endpoint.
 //
 // The guardrail is applied here, with ApplyGuardrail: to the question before
 // the harness sees it, and to the answer before the caller sees it. The
@@ -20,7 +22,7 @@
 
 import { BedrockAgentCoreClient, InvokeHarnessCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 const agentcore = new BedrockAgentCoreClient({});
 const bedrock = new BedrockRuntimeClient({});
@@ -51,7 +53,7 @@ const PAGE = `<!doctype html>
     <textarea id="question" rows="3" required>What is the status of order 1001?</textarea>
   </label>
   <label>Actor id (the same value is the same customer across sessions)
-    <input type="text" id="actor" value="customer-1">
+    <input type="text" id="actor" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}">
   </label>
   <button>Ask</button>
 </form>
@@ -61,6 +63,13 @@ const PAGE = `<!doctype html>
 <script>
   let sessionId = '';
   const byId = (id) => document.getElementById(id);
+  // Each browser starts as a customer of its own, kept in this browser between visits.
+  const actor = byId('actor');
+  try { actor.value = localStorage.getItem('actorId') || ''; } catch {}
+  if (!actor.value) actor.value = 'customer-' + crypto.randomUUID().slice(0, 8);
+  const saveActor = () => { try { localStorage.setItem('actorId', actor.value); } catch {} };
+  saveActor();
+  actor.onchange = saveActor;
   byId('reset').onclick = () => { sessionId = ''; byId('session').textContent = 'new'; };
   byId('ask').onsubmit = async (event) => {
     event.preventDefault();
@@ -162,6 +171,12 @@ async function readStream(stream) {
   return { answer: answers.at(-1) ?? '', tools: [...new Set(tools)] };
 }
 
+// The actor of a question that names none: one per session, so its summary is
+// never read in another caller's session.
+function sessionActor(session) {
+  return `session-${createHash('sha256').update(session).digest('hex').slice(0, 40)}`;
+}
+
 async function ask({ question, sessionId, actorId }) {
   const text = String(question ?? '').trim();
   if (!text) {
@@ -174,10 +189,11 @@ async function ask({ question, sessionId, actorId }) {
   if (session.length < MIN_SESSION_ID_LENGTH) {
     return json(400, { error: `sessionId has at least ${MIN_SESSION_ID_LENGTH} characters.` });
   }
-  const actor = String(actorId ?? '').trim();
-  if (actor && !ACTOR_ID.test(actor)) {
+  const givenActor = String(actorId ?? '').trim();
+  if (givenActor && !ACTOR_ID.test(givenActor)) {
     return json(400, { error: 'actorId has letters, digits, - and _ only, at most 64 characters.' });
   }
+  const actor = givenActor || sessionActor(session);
 
   try {
     const input = await guard('INPUT', text);
@@ -194,7 +210,7 @@ async function ask({ question, sessionId, actorId }) {
       new InvokeHarnessCommand({
         harnessArn: HARNESS_ARN,
         runtimeSessionId: session,
-        ...(actor ? { actorId: actor } : {}),
+        actorId: actor,
         messages: [{ role: 'user', content: [{ text: input.text }] }]
       })
     );
