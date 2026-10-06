@@ -1,0 +1,5 @@
+# Everything here runs on Linux: the buildspec commands in CodeBuild, the
+# workflow on the runner, the API in its container. Line endings stay LF on
+# every platform, so a file edited on Windows does not reach the build with a
+# carriage return at the end of each line.
+* text=auto eol=lf

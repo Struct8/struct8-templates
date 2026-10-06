@@ -1,0 +1,58 @@
+# release: every commit that reaches main becomes an image in ECR, tagged with
+# the commit, and a copy of the release in the artifacts bucket.
+#
+# What the CodeBuild project gives this file:
+#   compute    EC2 (LINUX_CONTAINER), privileged mode on, for Docker
+#   variable   IMAGE_REPO_URL  the URL of the ECR repository, with no tag
+#              (repository_url of aws_ecr_repository)
+#   artifacts  S3, the artifacts bucket, packaged as a ZIP and encrypted with
+#              the project's KMS key
+#   cache      S3, the cache bucket: keeps npm's download cache between builds
+#   webhook    PUSH on ^refs/heads/main$
+#   buildspec  buildspec/release.yml
+#
+# The repository has to accept a new image under the `latest` tag (MUTABLE, the
+# ECR default): each release moves it, and the next one reuses its layers.
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    DOCKER_BUILDKIT: "1"
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      - |
+        if [ -z "${IMAGE_REPO_URL:-}" ]; then
+          echo "IMAGE_REPO_URL is empty: give the project the URL of the ECR repository."
+          exit 1
+        fi
+      - export REGISTRY="${IMAGE_REPO_URL%%/*}"
+      - export IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:0:12}"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+      # The previous release, whose layers the build reuses. The first build has none.
+      - docker pull "$IMAGE_REPO_URL:latest" || echo "No previous image in the repository; building from scratch."
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/app"
+      - npm ci
+      - npm run test:unit
+      - docker build --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from "$IMAGE_REPO_URL:latest" --tag "$IMAGE_REPO_URL:$IMAGE_TAG" --tag "$IMAGE_REPO_URL:latest" .
+      - docker push "$IMAGE_REPO_URL:$IMAGE_TAG"
+      - docker push "$IMAGE_REPO_URL:latest"
+      - mkdir -p "$CODEBUILD_SRC_DIR/release"
+      - cp -R src migrations package.json package-lock.json Dockerfile "$CODEBUILD_SRC_DIR/release/"
+      - printf '{"image":"%s","commit":"%s","build":"%s"}\n' "$IMAGE_REPO_URL:$IMAGE_TAG" "$CODEBUILD_RESOLVED_SOURCE_VERSION" "$CODEBUILD_BUILD_ID" > "$CODEBUILD_SRC_DIR/release/release.json"
+
+artifacts:
+  base-directory: release
+  files:
+    - '**/*'
+
+cache:
+  paths:
+    - '/root/.npm/**/*'

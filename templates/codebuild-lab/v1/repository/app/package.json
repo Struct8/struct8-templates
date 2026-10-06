@@ -1,0 +1,26 @@
+{
+  "name": "codebuild-lab-orders",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small orders API that the codebuild-lab template tests, packages and ships.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "migrate": "node src/migrate.js",
+    "test:unit": "node --test \"test/unit/**/*.test.js\"",
+    "pretest:unit:report": "node -e \"require('node:fs').mkdirSync('reports', { recursive: true })\"",
+    "test:unit:report": "c8 --reporter=cobertura --reporter=text --report-dir=reports/coverage node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=reports/unit.xml \"test/unit/**/*.test.js\"",
+    "test:integration": "node --test --test-concurrency=1 \"test/integration/**/*.test.js\"",
+    "pretest:integration:report": "node -e \"require('node:fs').mkdirSync('reports', { recursive: true })\"",
+    "test:integration:report": "node --test --test-concurrency=1 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=reports/integration.xml \"test/integration/**/*.test.js\""
+  },
+  "dependencies": {
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "c8": "^12.0.0"
+  }
+}

@@ -1,0 +1,67 @@
+# integration: applies the migrations to the PostgreSQL database and runs the
+# integration tests against it, from inside the VPC. An EventBridge rule starts
+# it when a release succeeds, and another one every night.
+#
+# What the CodeBuild project gives this file:
+#   compute     EC2 (LINUX_CONTAINER), in private subnets of the database's VPC,
+#               with a route out through a NAT gateway: npm, Secrets Manager and
+#               the RDS certificate bundle are all reached over the internet
+#   connection  to the aws_db_instance, which gives the build
+#                 AWS_DB_INSTANCE_SECRET_ARN_0  the secret RDS manages for the
+#                                               master user
+#                 AWS_DB_INSTANCE_ENDPOINT_0    host:port
+#                 AWS_DB_INSTANCE_DB_NAME_0     the database
+#               and the right to read that secret. DB_SECRET_ARN, DB_ENDPOINT and
+#               DB_NAME, when the project sets them, are used instead.
+#   buildspec   buildspec/integration.yml
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    # RDS for PostgreSQL requires TLS. node-postgres turns `require` into a
+    # verified connection, and NODE_EXTRA_CA_CERTS, set below, is what makes Node
+    # trust the RDS certificate authorities.
+    PGSSLMODE: require
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+  pre_build:
+    commands:
+      - export DB_SECRET_ARN="${DB_SECRET_ARN:-${AWS_DB_INSTANCE_SECRET_ARN_0:-}}"
+      - export DB_ENDPOINT="${DB_ENDPOINT:-${AWS_DB_INSTANCE_ENDPOINT_0:-}}"
+      - |
+        if [ -z "$DB_SECRET_ARN" ] || [ -z "$DB_ENDPOINT" ]; then
+          echo "No database: connect the project to the PostgreSQL instance, or set DB_SECRET_ARN and DB_ENDPOINT."
+          exit 1
+        fi
+      - |
+        PGHOST="${DB_ENDPOINT%:*}"
+        PGPORT=5432
+        if [ "$PGHOST" != "$DB_ENDPOINT" ]; then PGPORT="${DB_ENDPOINT##*:}"; fi
+        export PGHOST PGPORT
+      - export PGDATABASE="${DB_NAME:-${AWS_DB_INSTANCE_DB_NAME_0:-postgres}}"
+      - cd "$CODEBUILD_SRC_DIR/app"
+      # The master user's credentials, read at run time. The value goes from the
+      # AWS CLI straight into the script through a pipe: it is never printed and
+      # never part of a command line.
+      - PGUSER="$(aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text | node scripts/secret-field.js username)"
+      - PGPASSWORD="$(aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text | node scripts/secret-field.js password)"
+      - export PGUSER PGPASSWORD
+      - curl --fail --silent --show-error --location --output /tmp/rds-global-bundle.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+      - export NODE_EXTRA_CA_CERTS=/tmp/rds-global-bundle.pem
+      - npm ci
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR/app"
+      - npm run migrate
+      - npm run test:integration:report
+
+reports:
+  integration-tests:
+    base-directory: app/reports
+    files:
+      - integration.xml
+    file-format: JUNITXML
