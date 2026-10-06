@@ -27,8 +27,14 @@ past 12 months since 2026-07-30, which is why this template does not use it.
   applies the guardrail to the question, sends it to the harness with
   `InvokeHarness`, applies the guardrail to the answer, and returns the answer
   with the session id, the tools the agent called and what the guardrail did.
-  The same session id continues a conversation; the same actor id is the same
-  customer, whose session summaries the memory keeps.
+  Nova models write their reasoning between `<thinking>` tags before the
+  answer; the handler removes it before the guardrail and the caller see the
+  answer.
+
+  The same session id continues a conversation. The same actor id is the same
+  customer: the memory writes a summary of each of their sessions, about a
+  minute and a half after it, and the harness reads those summaries in the
+  customer's next sessions.
 
   Reads at runtime:
   - `HARNESS_ARN` — set by the diagram from the harness.

@@ -11,6 +11,9 @@
 // the harness sees it, and to the answer before the caller sees it. The
 // harness itself has no guardrail setting.
 //
+// Nova models write their reasoning between <thinking> tags before the answer;
+// it is removed before the guardrail and the caller see the answer.
+//
 // Reads at runtime:
 //   HARNESS_ARN                     - set by the diagram from the harness.
 //   GUARDRAIL_ID, GUARDRAIL_VERSION - set by the diagram from the guardrail.
@@ -117,6 +120,16 @@ async function guard(source, text) {
   return { action: blocked ? 'BLOCKED' : 'ANONYMIZED', text: guarded };
 }
 
+// Nova models write their reasoning between <thinking> tags before the answer.
+// It is not part of the answer. An unclosed tag, from an answer cut short, takes
+// the rest of the text with it.
+function withoutReasoning(text) {
+  return text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
+    .replace(/<thinking>[\s\S]*$/, '')
+    .trim();
+}
+
 // The text of the last assistant message, and the tools the agent called.
 async function readStream(stream) {
   const messages = [];
@@ -142,8 +155,11 @@ async function readStream(stream) {
       throw error;
     }
   }
-  const last = [...messages].reverse().find((message) => message.role === 'assistant' && message.text.trim());
-  return { answer: last ? last.text.trim() : '', tools: [...new Set(tools)] };
+  const answers = messages
+    .filter((message) => message.role === 'assistant')
+    .map((message) => withoutReasoning(message.text))
+    .filter(Boolean);
+  return { answer: answers.at(-1) ?? '', tools: [...new Set(tools)] };
 }
 
 async function ask({ question, sessionId, actorId }) {
