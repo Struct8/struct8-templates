@@ -1,0 +1,32 @@
+# pr-check: the unit tests of every pull request, on Lambda compute.
+#
+# What the CodeBuild project gives this file:
+#   compute    Lambda, image aws/codebuild/amazonlinux-x86_64-lambda-standard:nodejs22
+#   webhook    PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED
+#   buildspec  buildspec/pr-check.yml
+#
+# Lambda compute has no runtime-versions, cache, privileged mode or VPC, and the
+# image already carries Node.js 22, so the build is three commands. The result
+# goes back to the pull request as a check, and the test cases and the coverage
+# go to two report groups CodeBuild creates on the first build:
+# <project name>-unit-tests and <project name>-coverage.
+version: 0.2
+
+phases:
+  build:
+    commands:
+      - cd app
+      - npm ci
+      - npm run test:unit:report
+
+reports:
+  unit-tests:
+    base-directory: app/reports
+    files:
+      - unit.xml
+    file-format: JUNITXML
+  coverage:
+    base-directory: app/reports/coverage
+    files:
+      - cobertura-coverage.xml
+    file-format: COBERTURAXML
