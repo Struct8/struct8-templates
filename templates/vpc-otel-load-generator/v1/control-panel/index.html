@@ -236,7 +236,7 @@
     let mode = localStorage.getItem("otelPanelMode") === "curve" ? "curve" : "constant";
     let profiles = [];
     let configLoaded = false;
-    let runStartedAt = null, runCurveTotal = 0;
+    let runStartedAt = null, runCurveTotal = 0, serverElapsed = null;
     els.token.value = sessionStorage.getItem("otelPanelToken") || "";
 
     // ---------- helpers ----------
@@ -314,7 +314,7 @@
       svg.append(el("text",{x:12,y:G.T+plotH()/2,class:"tick","text-anchor":"middle",transform:`rotate(-90 12 ${G.T+plotH()/2})`},"rate/s"));
       const bg=el("rect",{x:G.L,y:G.T,width:plotW(),height:plotH(),class:"plot-bg"});bg.addEventListener("pointerdown",onBackgroundDown);svg.append(bg);
       if(points.length){const coords=points.map(p=>`${xOf(p.t)},${yOf(p.vus)}`).join(" ");const base=yOf(0);svg.append(el("polygon",{points:`${xOf(points[0].t)},${base} ${coords} ${xOf(points[points.length-1].t)},${base}`,class:"area"}));svg.append(el("polyline",{points:coords,class:"line"}));}
-      if(running&&runStartedAt&&runCurveTotal){const elapsed=Math.min((Date.now()-runStartedAt)/1000,runCurveTotal);if(elapsed<=axisSeconds){const x=xOf(elapsed);svg.append(el("line",{x1:x,y1:G.T,x2:x,y2:G.T+plotH(),class:"progress"}));}}
+      if(running&&serverElapsed!=null){const elapsed=Math.min(serverElapsed,axisSeconds);if(elapsed>=0){const x=xOf(elapsed);svg.append(el("line",{x1:x,y1:G.T,x2:x,y2:G.T+plotH(),class:"progress"}));}}
       points.forEach((p,i)=>{const c=el("circle",{cx:xOf(p.t),cy:yOf(p.vus),r:i===activeIndex?7:5.5,class:"pt"+(i===activeIndex?" active":""),tabindex:"0",role:"slider","aria-label":`Point ${i+1}: ${p.vus}/s at ${fmtDur(p.t)}`});c.addEventListener("pointerdown",(ev)=>onPointDown(ev,i));c.addEventListener("keydown",(ev)=>onPointKey(ev,i));c.addEventListener("focus",()=>{if(activeIndex!==i){activeIndex=i;renderCurve();svg.querySelectorAll(".pt")[i]?.focus();}});svg.append(c);});
       if(activeIndex>=0&&points[activeIndex]){const p=points[activeIndex];const label=`${fmtDur(p.t)} · ${p.vus}/s`;const w=label.length*6.2+14;let x=xOf(p.t)-w/2,y=yOf(p.vus)-32;x=clamp(x,G.L,G.W-G.R-w);if(y<2)y=yOf(p.vus)+12;svg.append(el("rect",{x,y,width:w,height:20,rx:5,class:"tip-bg"}));svg.append(el("text",{x:x+w/2,y:y+14,class:"tip","text-anchor":"middle"},label));}
       renderTable();
@@ -506,11 +506,13 @@
         await syncDraft(s.draftRev);
         if (s.scheduler) {
           runCurveTotal = s.scheduler.totalSeconds || runCurveTotal;
+          serverElapsed = s.scheduler.elapsedSeconds;
           const loopPart = s.scheduler.loop ? ` · 🔁 loop (cycle ${s.scheduler.cycle})` : "";
           els.meta.textContent = `phase ${s.scheduler.phase}/${s.scheduler.totalPhases} · elapsed ${fmtDur(s.scheduler.elapsedSeconds)}${s.scheduler.totalSeconds?` / ${fmtDur(s.scheduler.totalSeconds)}`:""}${loopPart}`;
         } else { els.meta.textContent = ""; }
         if (s.logs) { const atBottom = els.logs.scrollTop + els.logs.clientHeight >= els.logs.scrollHeight - 20; els.logs.textContent = s.logs; if (atBottom) els.logs.scrollTop = els.logs.scrollHeight; }
-        if (s.running && mode === "curve" && runStartedAt && !drag) renderCurve();
+        if (!s.running) serverElapsed = null;
+        if (s.running && mode === "curve" && !drag) renderCurve();
       } catch (e) { els.status.textContent = e.status === 401 ? "Token required" : "Unreachable"; }
     }
 
