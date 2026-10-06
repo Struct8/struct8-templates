@@ -38,6 +38,10 @@ same shape as the `vpc-k6-load-generator` panel, so if you know one you know the
   refused), so "running" alone does not mean it is landing. The panel reads the output and shows a
   red alert naming the likely cause when exports are failing — so a run against a down/missing
   gateway is obvious instead of silently green.
+- **Loop**: a checkbox that, when on, restarts the run from the beginning when it ends and keeps
+  going until you press Stop. In Curve mode it replays the whole curve cycle after cycle (the status
+  shows `🔁 loop (cycle N)`); in Constant mode it re-fires the fixed run back to back. Handy for a
+  sustained soak or for leaving load on while you watch autoscaling over a long window.
 
 The panel files are fetched from this folder in the public repo at boot (`OTEL_PANEL_REF` pins a
 branch/tag/commit, default `main`).

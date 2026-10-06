@@ -163,10 +163,11 @@ function validateCommon(input, errors) {
 function validate(input) {
   const errors = [];
   const common = validateCommon(input, errors);
+  const loop = input.loop === true || input.loop === "true"; // repeat until stopped
 
   if (input.mode === "curve") {
     const curve = validateCurve(input.points, errors);
-    return { errors, config: { ...common, mode: "curve", ...curve } };
+    return { errors, config: { ...common, mode: "curve", loop, ...curve } };
   }
 
   const rate = Number(input.rate);
@@ -176,7 +177,7 @@ function validate(input) {
   if (!Number.isFinite(seconds) || seconds < 1) errors.push("Duration must look like 30s, 5m, 1h or 1m30s.");
   else if (seconds > MAX_DURATION_S) errors.push(`Duration is capped at ${MAX_DURATION_S} seconds on this panel.`);
 
-  return { errors, config: { ...common, mode: "constant", rate, duration, totalSeconds: seconds } };
+  return { errors, config: { ...common, mode: "constant", loop, rate, duration, totalSeconds: seconds } };
 }
 
 // Curve: absolute-time points {t: seconds since start, vus=rate}. We validate the same way the k6
@@ -279,18 +280,29 @@ async function launchPhase(cfg, rate, duration) {
 }
 
 // --- the scheduler: constant = one phase; curve = a sequence of phases, back to back ------------
-const scheduler = { active: false, cfg: null, phases: [], index: 0, timer: null, startedAt: 0 };
+// When cfg.loop is true, reaching the last phase restarts from the first, forever, until Stop.
+const scheduler = { active: false, cfg: null, phases: [], index: 0, timer: null, startedAt: 0, cycles: 0 };
 
 function stopScheduler() {
   scheduler.active = false;
   scheduler.phases = [];
   scheduler.index = 0;
+  scheduler.cycles = 0;
   if (scheduler.timer) { clearTimeout(scheduler.timer); scheduler.timer = null; }
 }
 
 async function runNextPhase() {
   if (!scheduler.active) return;
-  if (scheduler.index >= scheduler.phases.length) { stopScheduler(); await clearContainers(); return; }
+  if (scheduler.index >= scheduler.phases.length) {
+    // End of the sequence. If loop is on, start the curve over from the first phase; otherwise stop.
+    if (scheduler.cfg && scheduler.cfg.loop) {
+      scheduler.cycles++;
+      scheduler.index = 0;
+      scheduler.startedAt = Date.now(); // reset the elapsed clock for the new cycle
+    } else {
+      stopScheduler(); await clearContainers(); return;
+    }
+  }
   const ph = scheduler.phases[scheduler.index++];
   await launchPhase(scheduler.cfg, ph.rate, `${ph.seconds}s`);
   // Hand off to the next phase slightly before this one ends so there is no idle gap between them.
@@ -312,11 +324,12 @@ async function start(cfg) {
   const ph = phases[first];
   const results = await launchPhase(cfg, ph.rate, `${ph.seconds}s`);
   if (results.some((r) => !r.ok)) { stopScheduler(); return results; }
-  if (phases.length > 1) {
+  if (phases.length > 1 || cfg.loop) {
+    // Multi-phase, OR a single phase on loop: hand off to runNextPhase, which restarts when loop is on.
     const ms = Math.max(1000, ph.seconds * 1000 - 500);
     scheduler.timer = setTimeout(() => { runNextPhase().catch(() => {}); }, ms);
   } else {
-    // single flat phase: let it finish on its own, then mark inactive after its duration
+    // single flat phase, no loop: let it finish on its own, then mark inactive after its duration
     scheduler.timer = setTimeout(() => { stopScheduler(); }, ph.seconds * 1000 + 1000);
   }
   return results;
@@ -356,6 +369,8 @@ function schedulerInfo() {
     mode: scheduler.cfg?.mode,
     elapsedSeconds: Math.round((Date.now() - scheduler.startedAt) / 1000),
     totalSeconds: scheduler.cfg?.totalSeconds || 0,
+    loop: !!(scheduler.cfg && scheduler.cfg.loop),
+    cycle: scheduler.cycles + 1,
   };
 }
 
