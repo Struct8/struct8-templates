@@ -17,7 +17,9 @@ Source code and sample documents shipped with the `bedrock-rag-lab` template.
   behind a Lambda Function URL. Opened in a browser, it returns a page with a
   form. It answers questions with `RetrieveAndGenerate`: passages come from the
   knowledge base, the model writes the answer, the guardrail is applied, and the
-  answer lists the documents it came from. The page's **Sync documents** button
+  answer lists the documents it came from. The prompt of the answer step is
+  `PROMPT_TEMPLATE` in `index.mjs`: the model answers only from the passages,
+  and says so when they do not cover the question. The page's **Sync documents** button
   starts an ingestion job, which the knowledge base needs once after the first
   apply and again after the documents change.
 
