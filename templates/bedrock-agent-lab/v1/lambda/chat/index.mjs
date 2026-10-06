@@ -13,8 +13,9 @@
 // the harness sees it, and to the answer before the caller sees it. The
 // harness itself has no guardrail setting.
 //
-// Nova models write their reasoning between <thinking> tags before the answer;
-// it is removed before the guardrail and the caller see the answer.
+// Nova models write their reasoning between <thinking> tags before the answer,
+// and sometimes put the answer between <response> tags; the reasoning and the
+// tags are removed before the guardrail and the caller see the answer.
 //
 // Reads at runtime:
 //   HARNESS_ARN                     - set by the diagram from the harness.
@@ -131,11 +132,13 @@ async function guard(source, text) {
 
 // Nova models write their reasoning between <thinking> tags before the answer.
 // It is not part of the answer. An unclosed tag, from an answer cut short, takes
-// the rest of the text with it.
+// the rest of the text with it. Some answers come between <response> tags; the
+// text between them is the answer.
 function withoutReasoning(text) {
   return text
     .replace(/<thinking>[\s\S]*?<\/thinking>/g, '')
     .replace(/<thinking>[\s\S]*$/, '')
+    .replace(/<\/?response>/g, '')
     .trim();
 }
 

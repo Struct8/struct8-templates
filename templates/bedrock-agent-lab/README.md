@@ -28,8 +28,9 @@ past 12 months since 2026-07-30, which is why this template does not use it.
   `InvokeHarness`, applies the guardrail to the answer, and returns the answer
   with the session id, the tools the agent called and what the guardrail did.
   Nova models write their reasoning between `<thinking>` tags before the
-  answer; the handler removes it before the guardrail and the caller see the
-  answer.
+  answer, and sometimes put the answer between `<response>` tags; the handler
+  removes the reasoning and the tags before the guardrail and the caller see
+  the answer.
 
   The same session id continues a conversation. The same actor id is the same
   customer: the memory writes a summary of each of their sessions, about a
