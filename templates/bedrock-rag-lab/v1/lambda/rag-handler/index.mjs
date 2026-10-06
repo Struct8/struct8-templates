@@ -39,6 +39,26 @@ const {
   AWS_REGION
 } = process.env;
 
+// Prompt of the answer step. Without it, RetrieveAndGenerate with a guardrail
+// and Nova Lite returned the model's own search request as the answer
+// ('Action: GlobalDataSource.search(...)') for follow-up questions, questions
+// answered with a "no" and questions the documents do not cover. The guardrail
+// then blocked that text, so a correct answer came back as the blocked message.
+// $query$ must stay in the prompt: without it the same output came back.
+// $search_results$ and $output_format_instructions$ keep the citations.
+const PROMPT_TEMPLATE = [
+  'You answer questions using only the search results below.',
+  'If the search results do not contain the answer, say that the documents do not cover it.',
+  'Write only the answer, without a label such as "Answer:". Never write actions, tool calls or search queries.',
+  '',
+  'Search results:',
+  '$search_results$',
+  '',
+  '$output_format_instructions$',
+  '',
+  'Question: $query$'
+].join('\n');
+
 const PAGE = `<!doctype html>
 <html lang="en">
 <head>
@@ -134,6 +154,7 @@ async function ask(question, sessionId) {
             modelArn: `arn:aws:bedrock:${AWS_REGION}::foundation-model/${MODEL_ID}`,
             retrievalConfiguration: { vectorSearchConfiguration: { numberOfResults: 5 } },
             generationConfiguration: {
+              promptTemplate: { textPromptTemplate: PROMPT_TEMPLATE },
               guardrailConfiguration: {
                 guardrailId: GUARDRAIL_ID,
                 guardrailVersion: GUARDRAIL_VERSION
