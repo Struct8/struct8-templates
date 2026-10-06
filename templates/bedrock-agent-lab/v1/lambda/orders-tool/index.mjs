@@ -1,8 +1,9 @@
-// Action group handler of the bedrock-agent-lab template.
+// Tool of the bedrock-agent-lab template, behind an AgentCore gateway target.
 //
-// The Bedrock agent invokes this function when it decides to run
-// get_order_status. The event names the function and carries its parameters,
-// and the answer goes back in the function-details response format.
+// The gateway invokes this function when the agent calls get_order_status.
+// The event is the tool's arguments, { "order_id": "1001" }, and the tool name
+// comes in the client context as <target name>___<tool name>. Whatever JSON this
+// function returns is the tool result the agent reads.
 //
 // Reads at runtime:
 //   AWS_DYNAMODB_TABLE_NAME_0 - the orders table, set by the diagram from the
@@ -12,32 +13,26 @@ import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
 
 const client = new DynamoDBClient({});
 const TABLE = process.env.AWS_DYNAMODB_TABLE_NAME_0;
+const TOOL_NAME_DELIMITER = '___';
 
-function reply(event, body, responseState) {
-  const functionResponse = { responseBody: { TEXT: { body } } };
-  if (responseState) functionResponse.responseState = responseState;
-  return {
-    messageVersion: '1.0',
-    response: {
-      actionGroup: event.actionGroup,
-      function: event.function,
-      functionResponse
-    },
-    sessionAttributes: event.sessionAttributes ?? {},
-    promptSessionAttributes: event.promptSessionAttributes ?? {}
-  };
+// The tool name without the target prefix, or '' when the call did not come
+// through a gateway (a test invoke from the console, for example).
+function toolName(context) {
+  const custom = context?.clientContext?.custom ?? context?.clientContext?.Custom ?? {};
+  const fullName = String(custom.bedrockAgentCoreToolName ?? '');
+  const at = fullName.indexOf(TOOL_NAME_DELIMITER);
+  return at === -1 ? fullName : fullName.slice(at + TOOL_NAME_DELIMITER.length);
 }
 
-export const handler = async (event) => {
-  if (event.function !== 'get_order_status') {
-    return reply(event, `Unknown function: ${event.function}`, 'FAILURE');
+export const handler = async (event, context) => {
+  const tool = toolName(context);
+  if (tool && tool !== 'get_order_status') {
+    return { error: `Unknown tool: ${tool}` };
   }
 
-  const orderId = (event.parameters ?? [])
-    .find((parameter) => parameter.name === 'order_id')
-    ?.value?.trim();
+  const orderId = String(event?.order_id ?? '').trim();
   if (!orderId) {
-    return reply(event, 'An order number is required.', 'REPROMPT');
+    return { error: 'An order id is required.' };
   }
 
   try {
@@ -45,14 +40,14 @@ export const handler = async (event) => {
       new GetItemCommand({ TableName: TABLE, Key: { order_id: { S: orderId } } })
     );
     if (!Item) {
-      return reply(event, `Order ${orderId} was not found.`);
+      return { found: false, order_id: orderId, message: `Order ${orderId} was not found.` };
     }
     const order = Object.fromEntries(
       Object.entries(Item).map(([name, value]) => [name, value.S ?? value.N ?? ''])
     );
-    return reply(event, JSON.stringify(order));
+    return { found: true, order };
   } catch (error) {
     console.error('Reading the order failed:', error);
-    return reply(event, `The order could not be read: ${error.name}`, 'FAILURE');
+    return { error: `The order could not be read (${error.name}).` };
   }
 };

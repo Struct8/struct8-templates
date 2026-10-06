@@ -1,21 +1,32 @@
 // Chat endpoint of the bedrock-agent-lab template, behind a Lambda Function URL.
 //
 // GET with no question returns a small page with a form. A question goes to
-// the agent's alias, either as GET ?q=... or as a POST with a JSON body:
-//   { "question": "...", "sessionId": "...", "memoryId": "...", "endSession": true }
+// the AgentCore harness, either as GET ?q=... or as a POST with a JSON body:
+//   { "question": "...", "sessionId": "...", "actorId": "..." }
 // Only "question" is required. The same sessionId continues a conversation;
-// the same memoryId lets the agent recall the summary of earlier sessions.
+// the same actorId is the same customer, whose session summaries the memory
+// keeps across sessions.
+//
+// The guardrail is applied here, with ApplyGuardrail: to the question before
+// the harness sees it, and to the answer before the caller sees it. The
+// harness itself has no guardrail setting.
 //
 // Reads at runtime:
-//   AGENT_ID, AGENT_ALIAS_ID - set by the diagram from the agent and its alias.
+//   HARNESS_ARN                     - set by the diagram from the harness.
+//   GUARDRAIL_ID, GUARDRAIL_VERSION - set by the diagram from the guardrail.
 
-import {
-  BedrockAgentRuntimeClient,
-  InvokeAgentCommand
-} from '@aws-sdk/client-bedrock-agent-runtime';
+import { BedrockAgentCoreClient, InvokeHarnessCommand } from '@aws-sdk/client-bedrock-agentcore';
+import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { randomUUID } from 'node:crypto';
 
-const client = new BedrockAgentRuntimeClient({});
+const agentcore = new BedrockAgentCoreClient({});
+const bedrock = new BedrockRuntimeClient({});
+const { HARNESS_ARN, GUARDRAIL_ID, GUARDRAIL_VERSION } = process.env;
+
+// InvokeHarness refuses a runtime session id shorter than this.
+const MIN_SESSION_ID_LENGTH = 33;
+const ACTOR_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const MAX_QUESTION_LENGTH = 2000;
 
 const PAGE = `<!doctype html>
 <html lang="en">
@@ -36,14 +47,14 @@ const PAGE = `<!doctype html>
   <label>Question
     <textarea id="question" rows="3" required>What is the status of order 1001?</textarea>
   </label>
-  <label>Memory id (the same value is the same customer across sessions)
-    <input type="text" id="memory" value="customer-1">
+  <label>Actor id (the same value is the same customer across sessions)
+    <input type="text" id="actor" value="customer-1">
   </label>
-  <label><input type="checkbox" id="end"> End the session after this answer</label>
   <button>Ask</button>
 </form>
 <p>Session: <code id="session">new</code> <button type="button" id="reset">New session</button></p>
 <pre id="answer"></pre>
+<p id="details"></p>
 <script>
   let sessionId = '';
   const byId = (id) => document.getElementById(id);
@@ -51,23 +62,23 @@ const PAGE = `<!doctype html>
   byId('ask').onsubmit = async (event) => {
     event.preventDefault();
     byId('answer').textContent = '...';
-    const ending = byId('end').checked;
+    byId('details').textContent = '';
     const response = await fetch(location.pathname, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        question: byId('question').value,
-        sessionId,
-        memoryId: byId('memory').value,
-        endSession: ending
-      })
+      body: JSON.stringify({ question: byId('question').value, sessionId, actorId: byId('actor').value })
     });
     const result = await response.json();
     if (result.sessionId) {
-      sessionId = ending ? '' : result.sessionId;
-      byId('session').textContent = sessionId || 'new';
+      sessionId = result.sessionId;
+      byId('session').textContent = sessionId;
     }
     byId('answer').textContent = result.answer ?? result.error;
+    if (result.guardrail) {
+      const tools = result.tools && result.tools.length ? result.tools.join(', ') : 'none';
+      byId('details').textContent = 'Tools called: ' + tools + '. Guardrail on the question: ' +
+        result.guardrail.question + '; on the answer: ' + result.guardrail.answer + '.';
+    }
   };
 </script>
 </body>
@@ -89,34 +100,101 @@ function readBody(event) {
   return JSON.parse(text);
 }
 
-async function ask({ question, sessionId, memoryId, endSession }) {
-  if (!question || !String(question).trim()) {
+// NONE, ANONYMIZED or BLOCKED, and the text to use from here on: the guardrail's
+// output when it intervened (the masked text, or its blocked message).
+async function guard(source, text) {
+  const result = await bedrock.send(
+    new ApplyGuardrailCommand({
+      guardrailIdentifier: GUARDRAIL_ID,
+      guardrailVersion: GUARDRAIL_VERSION,
+      source,
+      content: [{ text: { text } }]
+    })
+  );
+  if (result.action !== 'GUARDRAIL_INTERVENED') return { action: 'NONE', text };
+  const guarded = (result.outputs ?? []).map((output) => output.text ?? '').join('');
+  const blocked = JSON.stringify(result.assessments ?? []).includes('"action":"BLOCKED"');
+  return { action: blocked ? 'BLOCKED' : 'ANONYMIZED', text: guarded };
+}
+
+// The text of the last assistant message, and the tools the agent called.
+async function readStream(stream) {
+  const messages = [];
+  const tools = [];
+  let current = null;
+  for await (const event of stream) {
+    if (event.messageStart) {
+      current = { role: event.messageStart.role, text: '' };
+      messages.push(current);
+    } else if (event.contentBlockStart?.start?.toolUse?.name) {
+      tools.push(event.contentBlockStart.start.toolUse.name);
+    } else if (typeof event.contentBlockDelta?.delta?.text === 'string') {
+      if (!current) {
+        current = { role: 'assistant', text: '' };
+        messages.push(current);
+      }
+      current.text += event.contentBlockDelta.delta.text;
+    } else if (event.runtimeClientError || event.internalServerException || event.validationException) {
+      const failure = event.runtimeClientError ?? event.internalServerException ?? event.validationException;
+      const error = new Error(failure.message ?? 'The harness reported an error.');
+      error.name = event.runtimeClientError ? 'RuntimeClientError'
+        : event.internalServerException ? 'InternalServerException' : 'ValidationException';
+      throw error;
+    }
+  }
+  const last = [...messages].reverse().find((message) => message.role === 'assistant' && message.text.trim());
+  return { answer: last ? last.text.trim() : '', tools: [...new Set(tools)] };
+}
+
+async function ask({ question, sessionId, actorId }) {
+  const text = String(question ?? '').trim();
+  if (!text) {
     return json(400, { error: 'A question is required.' });
   }
-  const session = (sessionId && String(sessionId).trim()) || randomUUID();
+  if (text.length > MAX_QUESTION_LENGTH) {
+    return json(400, { error: `A question has at most ${MAX_QUESTION_LENGTH} characters.` });
+  }
+  const session = String(sessionId ?? '').trim() || randomUUID();
+  if (session.length < MIN_SESSION_ID_LENGTH) {
+    return json(400, { error: `sessionId has at least ${MIN_SESSION_ID_LENGTH} characters.` });
+  }
+  const actor = String(actorId ?? '').trim();
+  if (actor && !ACTOR_ID.test(actor)) {
+    return json(400, { error: 'actorId has letters, digits, - and _ only, at most 64 characters.' });
+  }
 
   try {
-    const response = await client.send(
-      new InvokeAgentCommand({
-        agentId: process.env.AGENT_ID,
-        agentAliasId: process.env.AGENT_ALIAS_ID,
+    const input = await guard('INPUT', text);
+    if (input.action === 'BLOCKED') {
+      return json(200, {
+        answer: input.text,
         sessionId: session,
-        inputText: String(question),
-        ...(memoryId ? { memoryId: String(memoryId) } : {}),
-        ...(endSession ? { endSession: true } : {})
+        tools: [],
+        guardrail: { question: 'BLOCKED', answer: 'NONE' }
+      });
+    }
+
+    const response = await agentcore.send(
+      new InvokeHarnessCommand({
+        harnessArn: HARNESS_ARN,
+        runtimeSessionId: session,
+        ...(actor ? { actorId: actor } : {}),
+        messages: [{ role: 'user', content: [{ text: input.text }] }]
       })
     );
-    const decoder = new TextDecoder();
-    let answer = '';
-    for await (const part of response.completion) {
-      if (part.chunk?.bytes) answer += decoder.decode(part.chunk.bytes, { stream: true });
-    }
-    answer += decoder.decode();
-    return json(200, { answer, sessionId: session });
+    const { answer, tools } = await readStream(response.stream);
+
+    const output = answer ? await guard('OUTPUT', answer) : { action: 'NONE', text: '' };
+    return json(200, {
+      answer: output.text,
+      sessionId: session,
+      tools,
+      guardrail: { question: input.action, answer: output.action }
+    });
   } catch (error) {
     // The full error goes to the function's log only: messages from AWS can carry
     // account ids and ARNs, and this endpoint is public.
-    console.error('Invoking the agent failed:', error);
+    console.error('Answering the question failed:', error);
     return json(502, { error: `The agent call failed (${error.name}). See the function's log.` });
   }
 }
@@ -129,7 +207,7 @@ export const handler = async (event) => {
     if (!query.q) {
       return { statusCode: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: PAGE };
     }
-    return ask({ question: query.q, sessionId: query.session, memoryId: query.memory });
+    return ask({ question: query.q, sessionId: query.session, actorId: query.actor });
   }
 
   if (method !== 'POST') {
