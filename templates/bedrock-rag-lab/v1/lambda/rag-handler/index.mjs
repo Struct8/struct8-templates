@@ -16,6 +16,10 @@
 //   MODEL_ID                          - the model that writes the answer.
 //   GUARDRAIL_ID, GUARDRAIL_VERSION   - set by the diagram from the guardrail.
 //   AWS_REGION                        - provided by the runtime.
+//
+// Writes to its log one JSON line per question (the question, the answer,
+// whether the guardrail intervened, the documents cited, how long it took) and
+// one per sync started. See log() below.
 
 import {
   BedrockAgentRuntimeClient,
@@ -131,6 +135,16 @@ function readBody(event) {
   return JSON.parse(text);
 }
 
+// One JSON line in the function's log group. Without these lines the log held
+// only the START, END and REPORT lines the runtime writes for every invocation,
+// and nothing about what was asked or answered.
+// The question is logged as typed, and the log group keeps it for as long as its
+// retention says: the guardrail filters what the model reads and writes, not
+// this log.
+function log(entry) {
+  console.log(JSON.stringify(entry));
+}
+
 // Messages from AWS can carry account ids and ARNs, and this endpoint is
 // public: the full error goes to the function's log only.
 function failure(what, error) {
@@ -142,6 +156,7 @@ async function ask(question, sessionId) {
   if (!question || !String(question).trim()) {
     return json(400, { error: 'A question is required.' });
   }
+  const startedAt = Date.now();
   try {
     const response = await runtime.send(
       new RetrieveAndGenerateCommand({
@@ -170,13 +185,25 @@ async function ask(question, sessionId) {
         .map((reference) => reference.location?.s3Location?.uri)
         .filter(Boolean)
     }));
-    return json(200, {
-      answer: response.output?.text ?? '',
-      citations,
-      guardrailAction: response.guardrailAction ?? 'NONE',
-      sessionId: response.sessionId
+    const answer = response.output?.text ?? '';
+    const guardrailAction = response.guardrailAction ?? 'NONE';
+    log({
+      event: 'question',
+      question: String(question),
+      answer,
+      guardrailAction,
+      sources: [...new Set(citations.flatMap((citation) => citation.sources))],
+      sessionId: response.sessionId,
+      durationMs: Date.now() - startedAt
     });
+    return json(200, { answer, citations, guardrailAction, sessionId: response.sessionId });
   } catch (error) {
+    log({
+      event: 'question',
+      question: String(question),
+      error: error.name,
+      durationMs: Date.now() - startedAt
+    });
     return failure('Answering the question', error);
   }
 }
@@ -189,6 +216,7 @@ async function startSync() {
         dataSourceId: DATA_SOURCE_ID
       })
     );
+    log({ event: 'sync', ingestionJobId: ingestionJob.ingestionJobId, status: ingestionJob.status });
     return json(202, { ingestionJobId: ingestionJob.ingestionJobId, status: ingestionJob.status });
   } catch (error) {
     return failure('Starting the sync', error);
