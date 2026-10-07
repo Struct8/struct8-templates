@@ -30,6 +30,11 @@ Source code and sample documents shipped with the `bedrock-rag-lab` template.
   - `GUARDRAIL_ID`, `GUARDRAIL_VERSION` — set by the diagram from the guardrail.
   - `AWS_REGION` — provided by the runtime.
 
+  Writes to the function's log group one JSON line per question — the question
+  as typed, the answer, whether the guardrail intervened, the documents cited,
+  the session and the duration — and one per sync started. The log group keeps
+  them for its retention; the guardrail does not filter them.
+
   Dependencies (`@aws-sdk/client-bedrock-agent-runtime`,
   `@aws-sdk/client-bedrock-agent`) are the ones bundled in the `nodejs22.x`
   managed runtime; nothing is installed at deploy time. The apply zips this
