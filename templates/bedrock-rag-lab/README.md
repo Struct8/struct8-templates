@@ -23,12 +23,20 @@ Source code and sample documents shipped with the `bedrock-rag-lab` template.
   starts an ingestion job, which the knowledge base needs once after the first
   apply and again after the documents change.
 
-  Reads at runtime:
-  - `KNOWLEDGE_BASE_ID`, `DATA_SOURCE_ID` — set by the diagram from the knowledge
-    base and its data source.
-  - `MODEL_ID` — the model that writes the answer.
-  - `GUARDRAIL_ID`, `GUARDRAIL_VERSION` — set by the diagram from the guardrail.
-  - `AWS_REGION` — provided by the runtime.
+  Reads at runtime the variables the diagram generates from the function's
+  connections. Each name is the type at the other end, the value and the
+  connection's label (`0` without one), so renaming a node or copying the
+  template changes none of them. The same connections grant the permissions.
+  - `AWS_BEDROCKAGENT_KNOWLEDGE_BASE_ID_0` — the knowledge base it queries.
+  - `AWS_BEDROCKAGENT_DATA_SOURCE_ID_0`, `AWS_BEDROCKAGENT_DATA_SOURCE_KNOWLEDGE_BASE_ID_0`
+    — the data source the **Sync documents** button syncs, and its knowledge base.
+  - `AWS_BEDROCK_INFERENCE_PROFILE_ARN_0` — the application inference profile of
+    the model that writes the answer, passed as `modelArn`.
+  - `AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0`, `AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0`
+    — the guardrail. Optional: without that connection the answer is not filtered.
+
+  A missing connection is named in the answer (`The function is not connected
+  to the data source in the diagram.`).
 
   Writes to the function's log group one JSON line per question — the question
   as typed, the answer, whether the guardrail intervened, the documents cited,
