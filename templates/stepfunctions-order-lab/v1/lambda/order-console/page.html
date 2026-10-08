@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step Functions order lab</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5f6b7a; --line: #dde2e8;
+    --accent: #3b5bdb; --ok: #2b8a3e; --warn: #e67700; --bad: #c92a2a; --info: #1971c2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --card: #1c2027; --text: #e6e9ee; --muted: #9aa5b4; --line: #2e343e;
+      --accent: #748ffc; --ok: #51cf66; --warn: #ffa94d; --bad: #ff6b6b; --info: #4dabf7;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { padding: 1.25rem 1rem; border-bottom: 1px solid var(--line); background: var(--card); }
+  header h1 { margin: 0; font-size: 1.3rem; }
+  header p { margin: 0.25rem 0 0; color: var(--muted); }
+  main { display: grid; gap: 1rem; padding: 1rem; max-width: 1200px; margin: 0 auto; grid-template-columns: 1fr; }
+  @media (min-width: 1100px) { main { grid-template-columns: 3fr 2fr; } }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; min-width: 0; }
+  section h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+  .scenarios { display: grid; gap: 0.5rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  .scenario { text-align: left; padding: 0.6rem 0.75rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
+  .scenario:hover { border-color: var(--accent); }
+  .scenario strong { display: block; }
+  .scenario span { color: var(--muted); font-size: 0.85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  tr.selected td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  .scroll { overflow-x: auto; }
+  td code { white-space: nowrap; }
+  .actions { display: flex; flex-wrap: wrap; gap: 0.3rem; justify-content: flex-end; }
+  button.small { font: inherit; font-size: 0.85rem; padding: 0.15rem 0.5rem; border-radius: 4px; border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; }
+  button.small:hover { border-color: var(--accent); }
+  button.approve { border-color: var(--ok); color: var(--ok); }
+  button.reject { border-color: var(--bad); color: var(--bad); }
+  .badge { display: inline-block; padding: 0 0.45rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600; border: 1px solid currentColor; white-space: nowrap; }
+  .s-ok { color: var(--ok); } .s-bad { color: var(--bad); } .s-warn { color: var(--warn); } .s-info { color: var(--info); } .s-muted { color: var(--muted); }
+  .muted { color: var(--muted); }
+  .steps { list-style: none; margin: 0; padding: 0; }
+  .steps li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); }
+  .steps .error { color: var(--bad); font-size: 0.85rem; margin-top: 0.15rem; }
+  form.custom { display: grid; gap: 0.5rem; }
+  form.custom label { display: grid; gap: 0.15rem; font-size: 0.9rem; }
+  form.custom input { font: inherit; padding: 0.3rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); }
+  .qty { display: grid; gap: 0.35rem; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .qty input { width: 4rem; }
+  .events li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); }
+  .events { list-style: none; margin: 0; padding: 0; }
+  #message { min-height: 1.5rem; color: var(--muted); }
+  a { color: var(--accent); }
+  details summary { cursor: pointer; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Step Functions order lab</h1>
+  <p>Start an order and follow the workflow step by step. <a id="sm-link" href="#" target="_blank" rel="noopener">State machine in the AWS console</a></p>
+</header>
+<main>
+  <div style="display:grid;gap:1rem;min-width:0">
+    <section>
+      <h2>Run a scenario</h2>
+      <div class="scenarios" id="scenarios"></div>
+      <p id="message"></p>
+      <details>
+        <summary>Build your own order</summary>
+        <form class="custom" id="custom">
+          <label>Customer <input id="c-customer" value="Your name"></label>
+          <label>Card, last 4 digits (0000 is declined) <input id="c-card" value="4242" maxlength="4"></label>
+          <div class="qty" id="c-items"></div>
+          <div><button class="small" type="submit">Start order</button></div>
+        </form>
+      </details>
+    </section>
+    <section>
+      <h2>Orders</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Status</th><th></th></tr></thead>
+        <tbody id="orders"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
+      </table></div>
+    </section>
+    <section>
+      <h2>Execution <span id="exec-title" class="muted"></span></h2>
+      <div id="execution" class="muted">Choose an order to follow its execution.</div>
+    </section>
+  </div>
+  <div style="display:grid;gap:1rem;align-content:start;min-width:0">
+    <section>
+      <h2>Stock</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Product</th><th>Price</th><th>Stock</th></tr></thead>
+        <tbody id="products"></tbody>
+      </table></div>
+      <p><button class="small" id="restock">Restock every product</button></p>
+    </section>
+    <section>
+      <h2>Notifications</h2>
+      <p class="muted" style="margin-top:0">What the SNS topic delivered to the notifications queue: completed orders, failed executions (EventBridge) and the alarm.</p>
+      <ul class="events" id="events"></ul>
+    </section>
+  </div>
+</main>
+<script>
+  const SCENARIOS = [
+    ['normal', 'Normal order', 'Every step succeeds, in about 10 seconds.'],
+    ['invalid', 'Invalid data', 'Stops at ValidateOrder: the order is rejected.'],
+    ['high-value', 'High value (1,290)', 'Waits for your approval, for 5 minutes at most.'],
+    ['out-of-stock', 'Out of stock', 'ReserveStock fails, and nothing is charged.'],
+    ['flaky', 'Unstable payment', 'The gateway fails twice; the third try succeeds.'],
+    ['declined', 'Declined card', 'The stock goes back, and the failure alert arrives.'],
+    ['five-items', 'Five items', 'The Map packs the items, 3 at a time.'],
+  ];
+  const byId = (id) => document.getElementById(id);
+  const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  const money = (value) => typeof value === 'number' ? value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+  const time = (value) => value ? new Date(value).toLocaleTimeString() : '';
+  let selected = null;
+  let products = [];
+
+  function statusClass(status) {
+    if (['COMPLETED', 'SUCCEEDED', 'succeeded'].includes(status)) return 's-ok';
+    if (['REJECTED', 'PAYMENT_FAILED', 'APPROVAL_TIMED_OUT', 'FAILED', 'TIMED_OUT', 'ABORTED', 'failed'].includes(status)) return 's-bad';
+    if (['AWAITING_APPROVAL', 'caught', 'REJECTING'].includes(status)) return 's-warn';
+    if (['RUNNING', 'running'].includes(status)) return 's-info';
+    return 's-muted';
+  }
+  const badge = (status) => '<span class="badge ' + statusClass(status) + '">' + esc(status) + '</span>';
+
+  async function api(path, options) {
+    const response = await fetch(path, options);
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || response.statusText);
+    return body;
+  }
+  const post = (path, body) => api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const say = (text) => { byId('message').textContent = text; };
+
+  byId('scenarios').innerHTML = SCENARIOS.map(([key, title, text]) =>
+    '<button class="scenario" data-scenario="' + key + '"><strong>' + esc(title) + '</strong><span>' + esc(text) + '</span></button>').join('');
+  byId('scenarios').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-scenario]');
+    if (!button) return;
+    await startOrder({ scenario: button.dataset.scenario });
+  });
+
+  async function startOrder(body) {
+    say('Starting…');
+    try {
+      const { orderId } = await post('/api/orders', body);
+      say('Started ' + orderId + '.');
+      selected = orderId;
+      await refresh();
+      await followExecution();
+    } catch (error) {
+      say('Could not start the order: ' + error.message);
+    }
+  }
+
+  byId('custom').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const items = products
+      .map((product) => ({ sku: product.sku, qty: Number(byId('q-' + product.sku)?.value || 0) }))
+      .filter((item) => item.qty !== 0);
+    await startOrder({ scenario: 'custom', customer: byId('c-customer').value, card: byId('c-card').value, items });
+  });
+
+  byId('restock').addEventListener('click', async () => {
+    try { await post('/api/restock'); say('Every product is back at its starting stock.'); await refresh(); }
+    catch (error) { say('Restock failed: ' + error.message); }
+  });
+
+  byId('orders').addEventListener('click', async (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    const { order, action } = button.dataset;
+    if (action === 'follow') { selected = order; renderSelection(); await followExecution(); return; }
+    try {
+      await post('/api/orders/' + order + '/approval', { decision: action });
+      say(action === 'approve' ? 'Approved ' + order + '. The workflow continues.' : 'Rejected ' + order + '.');
+      selected = order;
+      await refresh();
+      await followExecution();
+    } catch (error) { say(error.message); }
+  });
+
+  function renderSelection() {
+    for (const row of byId('orders').querySelectorAll('tr[data-order]')) {
+      row.classList.toggle('selected', row.dataset.order === selected);
+    }
+  }
+
+  function renderState(state) {
+    byId('sm-link').href = state.stateMachine.consoleUrl;
+    products = state.products;
+    byId('products').innerHTML = state.products.map((product) =>
+      '<tr><td>' + esc(product.name) + ' <span class="muted">' + esc(product.sku) + '</span></td><td>' + money(product.price) + '</td><td>' + esc(product.stock) + '</td></tr>').join('');
+    if (!byId('c-items').dataset.ready) {
+      byId('c-items').innerHTML = state.products.map((product) =>
+        '<label>' + esc(product.name) + ' <input type="number" id="q-' + esc(product.sku) + '" value="0" min="0" max="20"></label>').join('');
+      byId('c-items').dataset.ready = '1';
+    }
+    byId('orders').innerHTML = state.orders.length === 0
+      ? '<tr><td colspan="5" class="muted">No orders yet. Run a scenario.</td></tr>'
+      : state.orders.map((order) => {
+          const actions = order.awaitingApproval
+            ? '<button class="small approve" data-order="' + esc(order.orderId) + '" data-action="approve">Approve</button><button class="small reject" data-order="' + esc(order.orderId) + '" data-action="reject">Reject</button>'
+            : '';
+          const reason = order.reason ? '<div class="muted" style="font-size:0.82rem">' + esc(order.reason) + '</div>' : '';
+          return '<tr data-order="' + esc(order.orderId) + '"><td><code>' + esc(order.orderId) + '</code><div class="muted" style="font-size:0.82rem">' + esc(order.scenario) + ' · ' + time(order.createdAt) + '</div></td><td>' + esc(order.customer) + '</td><td>' + money(order.total) + '</td><td>' + badge(order.status) + reason + '</td><td><div class="actions">' + actions + '<button class="small" data-order="' + esc(order.orderId) + '" data-action="follow">Follow</button></div></td></tr>';
+        }).join('');
+    renderSelection();
+    byId('events').innerHTML = state.events.length === 0
+      ? '<li class="muted">Nothing yet.</li>'
+      : state.events.map((event) => '<li><strong>' + esc(event.title) + '</strong> <span class="muted">' + esc(event.source) + ' · ' + time(event.at) + '</span>' + (event.text ? '<div class="muted" style="font-size:0.85rem">' + esc(event.text) + '</div>' : '') + '</li>').join('');
+  }
+
+  function renderExecution(execution) {
+    byId('exec-title').textContent = execution.orderId;
+    const steps = execution.rows.map((row) => {
+      const duration = row.exitedAt ? ((new Date(row.exitedAt) - new Date(row.enteredAt)) / 1000).toFixed(1) + ' s' : '';
+      const attempts = row.attempts > 1 ? ' · ' + row.attempts + ' tries' : '';
+      const errors = row.errors.map((error) => '<div class="error">' + time(error.at) + ' ' + esc(error.error) + (error.cause ? ': ' + esc(error.cause) : '') + '</div>').join('');
+      return '<li>' + badge(row.status) + ' <strong>' + esc(row.name) + '</strong> <span class="muted">' + esc(row.type) + ' · ' + time(row.enteredAt) + (duration ? ' · ' + duration : '') + attempts + '</span>' + errors + '</li>';
+    }).join('');
+    const failure = execution.error ? '<p class="s-bad">' + esc(execution.error) + (execution.cause ? ': ' + esc(execution.cause) : '') + '</p>' : '';
+    byId('execution').innerHTML =
+      '<p>' + badge(execution.status) + ' started ' + time(execution.startDate) + (execution.stopDate ? ', stopped ' + time(execution.stopDate) : '') +
+      ' · <a href="' + esc(execution.consoleUrl) + '" target="_blank" rel="noopener">Graph in the AWS console</a></p>' + failure +
+      '<ul class="steps">' + steps + '</ul>';
+    byId('execution').classList.remove('muted');
+  }
+
+  let following = null;
+  async function followExecution() {
+    if (!selected) return;
+    const orderId = selected;
+    following = orderId;
+    while (following === orderId) {
+      try {
+        const execution = await api('/api/orders/' + orderId + '/execution');
+        if (following !== orderId) return;
+        renderExecution(execution);
+        if (execution.status !== 'RUNNING') return;
+      } catch (error) {
+        byId('execution').textContent = error.message;
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+
+  async function refresh() {
+    try { renderState(await api('/api/state')); }
+    catch (error) { say('Could not read the state: ' + error.message); }
+  }
+
+  refresh();
+  setInterval(refresh, 3000);
+</script>
+</body>
+</html>
