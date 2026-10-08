@@ -10,10 +10,30 @@
 // which the workflow catches and records as REJECTED. Any other error is a
 // defect of this function, and the workflow does not catch it.
 //
+// Logs one JSON line when it starts and one with the outcome: the problems
+// found, or the total. The customer name and the card are not logged.
+//
 // Reads nothing at runtime: no environment variable, no AWS call.
+
+import { Console } from 'node:console';
 
 const MAX_LINES = 10;
 const MAX_QTY = 20;
+
+// ---------------------------------------------------------------- Logs
+// One JSON object per line, written straight to stdout. The runtime's console
+// puts the time, the request id and the level in front of each line, which
+// makes it text; a line that is JSON from its first character is split into
+// fields by CloudWatch Logs Insights, so a query can filter on orderId or
+// level with no parse step. traceId is the X-Ray trace of the invocation, the
+// id the X-Ray console searches by.
+const out = new Console({ stdout: process.stdout, stderr: process.stderr });
+let requestId;
+
+function log(level, message, fields = {}) {
+  const traceId = /Root=([^;]+)/.exec(process.env._X_AMZN_TRACE_ID ?? '')?.[1];
+  out.log(JSON.stringify({ level, message, ...fields, requestId, traceId }));
+}
 
 class InvalidOrder extends Error {
   constructor(problems) {
@@ -22,14 +42,18 @@ class InvalidOrder extends Error {
   }
 }
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
+  requestId = context?.awsRequestId;
   const order = event?.order ?? {};
+  const orderId = event?.orderId;
   const problems = [];
+
+  const items = Array.isArray(order.items) ? order.items : [];
+  log('INFO', 'Validating order', { orderId, scenario: order.scenario, lines: items.length });
 
   const customer = typeof order.customer === 'string' ? order.customer.trim() : '';
   if (!customer) problems.push('The customer name is empty.');
 
-  const items = Array.isArray(order.items) ? order.items : [];
   if (items.length === 0) problems.push('The order has no items.');
   if (items.length > MAX_LINES) problems.push(`The order has ${items.length} lines; the limit is ${MAX_LINES}.`);
 
@@ -59,11 +83,15 @@ export const handler = async (event) => {
   const card = typeof order.card === 'string' ? order.card.trim() : '';
   if (!/^\d{4}$/.test(card)) problems.push('The card must be the last 4 digits.');
 
-  if (problems.length > 0) throw new InvalidOrder(problems);
+  if (problems.length > 0) {
+    log('WARN', 'Order is invalid', { orderId, problems });
+    throw new InvalidOrder(problems);
+  }
 
   const total = Math.round(lines.reduce((sum, line) => sum + line.qty * line.price, 0) * 100) / 100;
+  log('INFO', 'Order is valid', { orderId, lines: lines.length, units: lines.reduce((sum, line) => sum + line.qty, 0), total });
   return {
-    orderId: event.orderId,
+    orderId,
     customer,
     card,
     scenario: typeof order.scenario === 'string' && order.scenario ? order.scenario : 'custom',

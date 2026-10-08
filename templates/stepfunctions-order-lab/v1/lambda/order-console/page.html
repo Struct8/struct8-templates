@@ -46,11 +46,16 @@
   .steps { list-style: none; margin: 0; padding: 0; }
   .steps li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); }
   .steps .error { color: var(--bad); font-size: 0.85rem; margin-top: 0.15rem; }
-  form.custom { display: grid; gap: 0.5rem; }
+  form.custom { display: grid; gap: 0.75rem; }
   form.custom label { display: grid; gap: 0.15rem; font-size: 0.9rem; }
   form.custom input { font: inherit; padding: 0.3rem 0.4rem; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--text); }
-  .qty { display: grid; gap: 0.35rem; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-  .qty input { width: 4rem; }
+  .row { display: grid; gap: 0.75rem; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  .pick input { width: 4.5rem; }
+  .pick td { vertical-align: middle; }
+  .hint { margin: 0; font-size: 0.85rem; }
+  .submit { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: flex-end; }
+  button.primary { font: inherit; font-weight: 600; padding: 0.45rem 1.1rem; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+  button.primary:disabled { opacity: 0.6; cursor: wait; }
   .events li { padding: 0.4rem 0; border-bottom: 1px solid var(--line); }
   .events { list-style: none; margin: 0; padding: 0; }
   #message { min-height: 1.5rem; color: var(--muted); }
@@ -61,23 +66,29 @@
 <body>
 <header>
   <h1>Step Functions order lab</h1>
-  <p>Start an order and follow the workflow step by step. <a id="sm-link" href="#" target="_blank" rel="noopener">State machine in the AWS console</a></p>
+  <p>Place an order and follow the workflow step by step. <a id="sm-link" href="#" target="_blank" rel="noopener">State machine in the AWS console</a></p>
 </header>
 <main>
   <div style="display:grid;gap:1rem;min-width:0">
     <section>
-      <h2>Run a scenario</h2>
-      <div class="scenarios" id="scenarios"></div>
+      <h2>Place an order</h2>
+      <form class="custom" id="custom">
+        <div class="row">
+          <label>Your name <input id="c-customer" placeholder="Ana" autocomplete="off"></label>
+          <label>Card, last 4 digits <input id="c-card" value="4242" maxlength="4" inputmode="numeric" autocomplete="off"></label>
+        </div>
+        <div class="scroll"><table class="pick">
+          <thead><tr><th>Product</th><th>Price</th><th>In stock</th><th>Quantity</th></tr></thead>
+          <tbody id="c-items"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+        </table></div>
+        <p class="muted hint">The card 0000 is declined. An order above 1,000 waits for your approval in the Orders list, for 5 minutes at most.</p>
+        <div class="submit"><strong>Total <span id="c-total">0.00</span></strong><button class="primary" id="c-submit" type="submit">Place order</button></div>
+      </form>
       <p id="message"></p>
-      <details>
-        <summary>Build your own order</summary>
-        <form class="custom" id="custom">
-          <label>Customer <input id="c-customer" value="Your name"></label>
-          <label>Card, last 4 digits (0000 is declined) <input id="c-card" value="4242" maxlength="4"></label>
-          <div class="qty" id="c-items"></div>
-          <div><button class="small" type="submit">Start order</button></div>
-        </form>
-      </details>
+    </section>
+    <section>
+      <h2>Or run a ready-made scenario</h2>
+      <div class="scenarios" id="scenarios"></div>
     </section>
     <section>
       <h2>Orders</h2>
@@ -152,22 +163,39 @@
 
   async function startOrder(body) {
     say('Starting…');
+    byId('c-submit').disabled = true;
     try {
       const { orderId } = await post('/api/orders', body);
-      say('Started ' + orderId + '.');
+      say('Order ' + orderId + ' placed. Its steps appear under Execution.');
       selected = orderId;
       await refresh();
+      byId('execution').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
       await followExecution();
     } catch (error) {
-      say('Could not start the order: ' + error.message);
+      say('Could not place the order: ' + error.message);
+    } finally {
+      byId('c-submit').disabled = false;
     }
   }
 
+  // The lines of the form: every product with a quantity other than 0.
+  function chosenItems() {
+    return products
+      .map((product) => ({ sku: product.sku, price: product.price, qty: Number(byId('q-' + product.sku)?.value || 0) }))
+      .filter((item) => item.qty !== 0);
+  }
+
+  function updateTotal() {
+    const total = chosenItems().reduce((sum, item) => sum + item.qty * item.price, 0);
+    byId('c-total').textContent = money(total);
+  }
+
+  byId('c-items').addEventListener('input', updateTotal);
+
   byId('custom').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const items = products
-      .map((product) => ({ sku: product.sku, qty: Number(byId('q-' + product.sku)?.value || 0) }))
-      .filter((item) => item.qty !== 0);
+    const items = chosenItems().map(({ sku, qty }) => ({ sku, qty }));
+    if (items.length === 0) { say('Choose a quantity for at least one product.'); return; }
     await startOrder({ scenario: 'custom', customer: byId('c-customer').value, card: byId('c-card').value, items });
   });
 
@@ -201,13 +229,20 @@
     products = state.products;
     byId('products').innerHTML = state.products.map((product) =>
       '<tr><td>' + esc(product.name) + ' <span class="muted">' + esc(product.sku) + '</span></td><td>' + money(product.price) + '</td><td>' + esc(product.stock) + '</td></tr>').join('');
+    // Drawn once, so a refresh never resets a quantity being typed; the stock
+    // column is the only part that changes.
     if (!byId('c-items').dataset.ready) {
       byId('c-items').innerHTML = state.products.map((product) =>
-        '<label>' + esc(product.name) + ' <input type="number" id="q-' + esc(product.sku) + '" value="0" min="0" max="20"></label>').join('');
+        '<tr><td>' + esc(product.name) + '</td><td>' + money(product.price) + '</td><td id="s-' + esc(product.sku) + '"></td>' +
+        '<td><input type="number" id="q-' + esc(product.sku) + '" value="0" min="0" max="20" aria-label="Quantity of ' + esc(product.name) + '"></td></tr>').join('');
       byId('c-items').dataset.ready = '1';
     }
+    for (const product of state.products) {
+      const cell = byId('s-' + product.sku);
+      if (cell) cell.innerHTML = product.stock > 0 ? esc(product.stock) : '<span class="s-bad">' + esc(product.stock) + '</span>';
+    }
     byId('orders').innerHTML = state.orders.length === 0
-      ? '<tr><td colspan="5" class="muted">No orders yet. Run a scenario.</td></tr>'
+      ? '<tr><td colspan="5" class="muted">No orders yet. Place one above.</td></tr>'
       : state.orders.map((order) => {
           const actions = order.awaitingApproval
             ? '<button class="small approve" data-order="' + esc(order.orderId) + '" data-action="approve">Approve</button><button class="small reject" data-order="' + esc(order.orderId) + '" data-action="reject">Reject</button>'

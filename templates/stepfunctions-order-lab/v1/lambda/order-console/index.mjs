@@ -17,6 +17,11 @@
 // The products are written by this function the first time the page loads,
 // when the table has none. Restock writes them again.
 //
+// Logs every request with its status and duration, except the two the page
+// polls every few seconds (/api/state and an execution), which are logged
+// only when they fail. Also logs each order started, each approval decided,
+// each restock and the notifications moved from the queue to the table.
+//
 // Reads at runtime:
 //   AWS_DYNAMODB_TABLE_NAME_*      - set by the diagram from the connection to the table.
 //   AWS_SFN_STATE_MACHINE_ARN_*    - set by the diagram from the connection to the state machine.
@@ -40,6 +45,7 @@ import {
   StartExecutionCommand,
 } from '@aws-sdk/client-sfn';
 import { DeleteMessageBatchCommand, ReceiveMessageCommand, SQSClient } from '@aws-sdk/client-sqs';
+import { Console } from 'node:console';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
@@ -48,6 +54,21 @@ const sfn = new SFNClient({});
 const sqs = new SQSClient({});
 const REGION = process.env.AWS_REGION;
 const PAGE = readFileSync(new URL('./page.html', import.meta.url), 'utf8');
+
+// ---------------------------------------------------------------- Logs
+// One JSON object per line, written straight to stdout. The runtime's console
+// puts the time, the request id and the level in front of each line, which
+// makes it text; a line that is JSON from its first character is split into
+// fields by CloudWatch Logs Insights, so a query can filter on orderId or
+// level with no parse step. traceId is the X-Ray trace of the invocation, the
+// id the X-Ray console searches by.
+const out = new Console({ stdout: process.stdout, stderr: process.stderr });
+let requestId;
+
+function log(level, message, fields = {}) {
+  const traceId = /Root=([^;]+)/.exec(process.env._X_AMZN_TRACE_ID ?? '')?.[1];
+  out.log(JSON.stringify({ level, message, ...fields, requestId, traceId }));
+}
 
 function envByPrefix(prefix) {
   const key = Object.keys(process.env)
@@ -125,7 +146,8 @@ async function queryPartition(pk, limit, newestFirst) {
   return items.slice(0, limit);
 }
 
-async function writeCatalog() {
+async function writeCatalog(reason) {
+  log('INFO', 'Writing the products at their starting stock', { reason, products: CATALOG.length });
   for (const product of CATALOG) {
     await dynamodb.send(
       new PutItemCommand({
@@ -146,7 +168,7 @@ async function writeCatalog() {
 async function readProducts() {
   let products = await queryPartition('PRODUCT', 100, false);
   if (products.length === 0) {
-    await writeCatalog();
+    await writeCatalog('the table has no products');
     products = await queryPartition('PRODUCT', 100, false);
   }
   return products.map(({ sk, name, price, stock, startingStock }) => ({ sku: sk, name, price, stock, startingStock }));
@@ -229,14 +251,16 @@ function describeNotification(envelope) {
 
 async function drainNotifications(accountId) {
   const QueueUrl = notificationQueueUrl(accountId);
+  const bySource = {};
   for (let round = 0; round < 3; round++) {
     const { Messages = [] } = await sqs.send(
       new ReceiveMessageCommand({ QueueUrl, MaxNumberOfMessages: 10, WaitTimeSeconds: 0 })
     );
-    if (Messages.length === 0) return;
+    if (Messages.length === 0) break;
     for (const message of Messages) {
       const envelope = parseJson(message.Body) ?? {};
       const { source, title, text } = describeNotification(envelope);
+      bySource[source] = (bySource[source] ?? 0) + 1;
       const at = envelope.Timestamp ?? new Date().toISOString();
       await dynamodb.send(
         new PutItemCommand({
@@ -259,6 +283,8 @@ async function drainNotifications(accountId) {
       })
     );
   }
+  const moved = Object.values(bySource).reduce((sum, count) => sum + count, 0);
+  if (moved > 0) log('INFO', 'Notifications moved from the queue to the table', { moved, bySource });
 }
 
 // ---------------------------------------------------------------- Step Functions
@@ -297,6 +323,16 @@ async function startOrder(body) {
   await sfn.send(
     new StartExecutionCommand({ stateMachineArn: STATE_MACHINE_ARN, name: orderId, input: JSON.stringify(input) })
   );
+  // The total as the page shows it; ValidateOrder computes the one the
+  // workflow uses, after checking each line.
+  const total = items.reduce((sum, item) => sum + (Number(item.qty) || 0) * (Number(item.price) || 0), 0);
+  log('INFO', 'Order started', {
+    orderId,
+    scenario,
+    items: items.map((item) => ({ sku: item.sku, qty: item.qty })),
+    total: Math.round(total * 100) / 100,
+    executionArn: executionArnOf(orderId),
+  });
   return json(200, { orderId, executionArn: executionArnOf(orderId) });
 }
 
@@ -458,6 +494,7 @@ async function decideApproval(orderId, decision) {
     }
     throw error;
   }
+  log('INFO', decision === 'approve' ? 'Order approved' : 'Order rejected', { orderId, decision, total: order.total });
   return json(200, { orderId, decision });
 }
 
@@ -491,31 +528,56 @@ async function readState(accountId) {
   });
 }
 
+async function route(method, path, event, accountId) {
+  if (method === 'GET' && (path === '/' || path === '')) {
+    return { statusCode: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: PAGE };
+  }
+  if (method === 'GET' && path === '/api/state') return await readState(accountId);
+  if (method === 'POST' && path === '/api/orders') return await startOrder(readBody(event));
+  if (method === 'POST' && path === '/api/restock') {
+    await writeCatalog('restock from the page');
+    return json(200, { restocked: CATALOG.length });
+  }
+  const execution = path.match(/^\/api\/orders\/([A-Za-z0-9_-]{1,80})\/execution$/);
+  if (method === 'GET' && execution) return await readExecution(execution[1]);
+  const approval = path.match(/^\/api\/orders\/([A-Za-z0-9_-]{1,80})\/approval$/);
+  if (method === 'POST' && approval) return await decideApproval(approval[1], readBody(event).decision);
+  return json(404, { error: `No route for ${method} ${path}.` });
+}
+
+// What an open page asks every few seconds. Logged only when it fails, or a
+// page left open would write a line every 2 to 3 seconds.
+const POLLED = [/^\/api\/state$/, /^\/api\/orders\/[^/]+\/execution$/];
+
 export const handler = async (event, context) => {
+  requestId = context?.awsRequestId;
+  const started = Date.now();
   const method = event.requestContext?.http?.method ?? 'GET';
   const path = event.rawPath ?? '/';
   // The account of this function is the account of the queue: both are in the
   // same diagram state.
   const accountId = String(context?.invokedFunctionArn ?? '').split(':')[4];
 
+  let response;
+  let failure;
   try {
-    if (method === 'GET' && (path === '/' || path === '')) {
-      return { statusCode: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body: PAGE };
-    }
-    if (method === 'GET' && path === '/api/state') return await readState(accountId);
-    if (method === 'POST' && path === '/api/orders') return await startOrder(readBody(event));
-    if (method === 'POST' && path === '/api/restock') {
-      await writeCatalog();
-      return json(200, { restocked: CATALOG.length });
-    }
-    const execution = path.match(/^\/api\/orders\/([A-Za-z0-9_-]{1,80})\/execution$/);
-    if (method === 'GET' && execution) return await readExecution(execution[1]);
-    const approval = path.match(/^\/api\/orders\/([A-Za-z0-9_-]{1,80})\/approval$/);
-    if (method === 'POST' && approval) return await decideApproval(approval[1], readBody(event).decision);
-    return json(404, { error: `No route for ${method} ${path}.` });
+    response = await route(method, path, event, accountId);
   } catch (error) {
-    console.error(error);
-    if (error instanceof SyntaxError) return json(400, { error: 'The body must be JSON.' });
-    return json(500, { error: `${error.name}: ${error.message}` });
+    if (error instanceof SyntaxError) {
+      response = json(400, { error: 'The body must be JSON.' });
+    } else {
+      failure = error;
+      response = json(500, { error: `${error.name}: ${error.message}` });
+    }
   }
+
+  const fields = { method, path, status: response.statusCode, durationMs: Date.now() - started };
+  if (failure) {
+    log('ERROR', 'Request failed', { ...fields, error: failure.name, detail: failure.message, stack: failure.stack });
+  } else if (response.statusCode >= 400) {
+    log('WARN', 'Request refused', { ...fields, error: parseJson(response.body)?.error });
+  } else if (!POLLED.some((pattern) => pattern.test(path))) {
+    log('INFO', 'Request served', fields);
+  }
+  return response;
 };
