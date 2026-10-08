@@ -13,9 +13,13 @@ apply zips each folder as it is. Every dependency (`@aws-sdk/client-dynamodb`,
 `@aws-sdk/client-sfn`, `@aws-sdk/client-sqs`) is bundled in the managed
 runtime; nothing is installed at deploy time.
 
-The workflow itself is not in this folder: its definition is the `definition`
-field of the state machine in the diagram, where it references the functions,
-the table, the queue and the topic by their Terraform addresses.
+The workflow definition is `v1/stepfunctions/order-workflow.asl.json`. The
+state machine in the diagram reads it from this repository (its
+`definition_file_path_`), as a Terraform template: each `${type.name.attribute}`
+in it becomes that attribute of the resource the state machine is connected
+to, such as `${aws_lambda_function.order-validate.arn}`. A `$$.` context path
+is left as it is. A literal `${` would have to be written `$${`; this file has
+none.
 
 ### The workflow
 
