@@ -10,12 +10,21 @@
 //   GET ?job=...
 //     Status of an ingestion job.
 //
-// Reads at runtime:
-//   KNOWLEDGE_BASE_ID, DATA_SOURCE_ID - set by the diagram from the knowledge
-//                                       base and its data source.
-//   MODEL_ID                          - the model that writes the answer.
-//   GUARDRAIL_ID, GUARDRAIL_VERSION   - set by the diagram from the guardrail.
-//   AWS_REGION                        - provided by the runtime.
+// Reads at runtime the variables the diagram generates from the function's
+// connections, one set per connection. The name is <type at the other end>_
+// <value>_<label of the connection>, and 0 when the connection has no label:
+//   AWS_BEDROCKAGENT_KNOWLEDGE_BASE_ID_0          - the knowledge base it queries.
+//   AWS_BEDROCKAGENT_DATA_SOURCE_ID_0,
+//   AWS_BEDROCKAGENT_DATA_SOURCE_KNOWLEDGE_BASE_ID_0
+//                                                - the data source it syncs, and
+//                                                  the knowledge base it belongs to.
+//   AWS_BEDROCK_INFERENCE_PROFILE_ARN_0           - the inference profile of the
+//                                                  model that writes the answer.
+//   AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0,
+//   AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0     - the guardrail, optional.
+// None of them carries a node's name, so renaming a node or copying the template
+// changes no name here. The same connections grant the function its
+// permissions.
 //
 // Writes to its log one JSON line per question (the question, the answer,
 // whether the guardrail intervened, the documents cited, how long it took) and
@@ -34,14 +43,13 @@ import {
 const runtime = new BedrockAgentRuntimeClient({});
 const agent = new BedrockAgentClient({});
 
-const {
-  KNOWLEDGE_BASE_ID,
-  DATA_SOURCE_ID,
-  MODEL_ID,
-  GUARDRAIL_ID,
-  GUARDRAIL_VERSION,
-  AWS_REGION
-} = process.env;
+const env = process.env;
+const KNOWLEDGE_BASE_ID = env.AWS_BEDROCKAGENT_KNOWLEDGE_BASE_ID_0;
+const DATA_SOURCE_ID = env.AWS_BEDROCKAGENT_DATA_SOURCE_ID_0;
+const DATA_SOURCE_KNOWLEDGE_BASE_ID = env.AWS_BEDROCKAGENT_DATA_SOURCE_KNOWLEDGE_BASE_ID_0;
+const MODEL_ARN = env.AWS_BEDROCK_INFERENCE_PROFILE_ARN_0;
+const GUARDRAIL_ID = env.AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0;
+const GUARDRAIL_VERSION = env.AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0;
 
 // Prompt of the answer step. Without it, RetrieveAndGenerate with a guardrail
 // and Nova Lite returned the model's own search request as the answer
@@ -145,6 +153,17 @@ function log(entry) {
   console.log(JSON.stringify(entry));
 }
 
+// A connection missing from the diagram leaves its variables unset. The answer
+// names the connection, instead of the call failing later in AWS with a
+// validation error about an empty id.
+function notConnected(required) {
+  const absent = Object.entries(required)
+    .filter(([, value]) => !value)
+    .map(([what]) => what);
+  if (absent.length === 0) return null;
+  return json(500, { error: `The function is not connected to ${absent.join(' and ')} in the diagram.` });
+}
+
 // Messages from AWS can carry account ids and ARNs, and this endpoint is
 // public: the full error goes to the function's log only.
 function failure(what, error) {
@@ -156,6 +175,11 @@ async function ask(question, sessionId) {
   if (!question || !String(question).trim()) {
     return json(400, { error: 'A question is required.' });
   }
+  const unconnected = notConnected({
+    'the knowledge base': KNOWLEDGE_BASE_ID,
+    'the inference profile': MODEL_ARN
+  });
+  if (unconnected) return unconnected;
   const startedAt = Date.now();
   try {
     const response = await runtime.send(
@@ -166,14 +190,21 @@ async function ask(question, sessionId) {
           type: 'KNOWLEDGE_BASE',
           knowledgeBaseConfiguration: {
             knowledgeBaseId: KNOWLEDGE_BASE_ID,
-            modelArn: `arn:aws:bedrock:${AWS_REGION}::foundation-model/${MODEL_ID}`,
+            // The inference profile's ARN, which RetrieveAndGenerate takes in
+            // place of a model's.
+            modelArn: MODEL_ARN,
             retrievalConfiguration: { vectorSearchConfiguration: { numberOfResults: 5 } },
             generationConfiguration: {
               promptTemplate: { textPromptTemplate: PROMPT_TEMPLATE },
-              guardrailConfiguration: {
-                guardrailId: GUARDRAIL_ID,
-                guardrailVersion: GUARDRAIL_VERSION
-              }
+              // Without a connection to a guardrail, the answer is not filtered.
+              ...(GUARDRAIL_ID
+                ? {
+                    guardrailConfiguration: {
+                      guardrailId: GUARDRAIL_ID,
+                      guardrailVersion: GUARDRAIL_VERSION
+                    }
+                  }
+                : {})
             }
           }
         }
@@ -209,10 +240,12 @@ async function ask(question, sessionId) {
 }
 
 async function startSync() {
+  const unconnected = notConnected({ 'the data source': DATA_SOURCE_ID });
+  if (unconnected) return unconnected;
   try {
     const { ingestionJob } = await agent.send(
       new StartIngestionJobCommand({
-        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        knowledgeBaseId: DATA_SOURCE_KNOWLEDGE_BASE_ID,
         dataSourceId: DATA_SOURCE_ID
       })
     );
@@ -224,10 +257,12 @@ async function startSync() {
 }
 
 async function syncStatus(ingestionJobId) {
+  const unconnected = notConnected({ 'the data source': DATA_SOURCE_ID });
+  if (unconnected) return unconnected;
   try {
     const { ingestionJob } = await agent.send(
       new GetIngestionJobCommand({
-        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        knowledgeBaseId: DATA_SOURCE_KNOWLEDGE_BASE_ID,
         dataSourceId: DATA_SOURCE_ID,
         ingestionJobId
       })
