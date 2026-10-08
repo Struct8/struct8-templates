@@ -1,0 +1,258 @@
+{
+  "Comment": "Order workflow of the stepfunctions-order-lab template. The execution name is the order id.",
+  "StartAt": "ValidateOrder",
+  "States": {
+    "ValidateOrder": {
+      "Type": "Task",
+      "Comment": "Task with Catch: an invalid order goes to MarkRejected.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${aws_lambda_function.order-validate.arn}",
+        "Payload": { "order.$": "$", "orderId.$": "$$.Execution.Name" }
+      },
+      "OutputPath": "$.Payload",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1, "MaxAttempts": 3, "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["InvalidOrder"], "ResultPath": "$.error", "Next": "MarkRejected" }],
+      "Next": "SaveOrder"
+    },
+    "SaveOrder": {
+      "Type": "Task",
+      "Comment": "Direct service integration: DynamoDB PutItem, with no Lambda in between.",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${aws_dynamodb_table.order-lab-data.name}",
+        "Item": {
+          "pk": { "S": "ORDER" },
+          "sk": { "S.$": "$$.Execution.Name" },
+          "customer": { "S.$": "$.customer" },
+          "scenario": { "S.$": "$.scenario" },
+          "items": { "S.$": "States.JsonToString($.items)" },
+          "total": { "N.$": "States.Format('{}', $.total)" },
+          "status": { "S": "RECEIVED" },
+          "createdAt": { "S.$": "$$.Execution.StartTime" },
+          "updatedAt": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "NeedsApproval"
+    },
+    "NeedsApproval": {
+      "Type": "Choice",
+      "Comment": "Choice: an order above 1000 waits for a person.",
+      "Choices": [{ "Variable": "$.total", "NumericGreaterThan": 1000, "Next": "WaitForApproval" }],
+      "Default": "ReserveStock"
+    },
+    "WaitForApproval": {
+      "Type": "Task",
+      "Comment": "Callback: the task token goes to SQS, and the execution waits for SendTaskSuccess or SendTaskFailure, for 5 minutes at most.",
+      "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+      "Parameters": {
+        "QueueUrl": "${aws_sqs_queue.order-approvals.url}",
+        "MessageBody": {
+          "orderId.$": "$$.Execution.Name",
+          "customer.$": "$.customer",
+          "total.$": "$.total",
+          "taskToken.$": "$$.Task.Token"
+        }
+      },
+      "TimeoutSeconds": 300,
+      "ResultPath": "$.approval",
+      "Catch": [
+        { "ErrorEquals": ["ApprovalRejected"], "ResultPath": "$.error", "Next": "MarkRejected" },
+        { "ErrorEquals": ["States.Timeout"], "ResultPath": "$.error", "Next": "MarkApprovalTimedOut" }
+      ],
+      "Next": "ReserveStock"
+    },
+    "ReserveStock": {
+      "Type": "Task",
+      "Comment": "A business error: OutOfStock comes from a conditional write on the stock.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${aws_lambda_function.order-reserve.arn}",
+        "Payload.$": "$"
+      },
+      "ResultSelector": { "items.$": "$.Payload.items" },
+      "ResultPath": "$.reservation",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1, "MaxAttempts": 3, "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["OutOfStock"], "ResultPath": "$.error", "Next": "MarkRejected" }],
+      "Next": "ChargePayment"
+    },
+    "ChargePayment": {
+      "Type": "Task",
+      "Comment": "Retry with backoff: a gateway that does not answer is tried again after 2 and 4 seconds. A declined card is not retried.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${aws_lambda_function.order-charge.arn}",
+        "Payload": { "order.$": "$", "attempt.$": "$$.State.RetryCount" }
+      },
+      "ResultSelector": {
+        "paymentId.$": "$.Payload.paymentId",
+        "amount.$": "$.Payload.amount",
+        "attempts.$": "$.Payload.attempts"
+      },
+      "ResultPath": "$.payment",
+      "Retry": [
+        { "ErrorEquals": ["PaymentGatewayUnavailable"], "IntervalSeconds": 2, "MaxAttempts": 3, "BackoffRate": 2 },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1, "MaxAttempts": 3, "BackoffRate": 2
+        }
+      ],
+      "Catch": [{ "ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "ReleaseStock" }],
+      "Next": "PackItems"
+    },
+    "ReleaseStock": {
+      "Type": "Task",
+      "Comment": "Compensation: the stock reserved for this order goes back before the order is marked as failed.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${aws_lambda_function.order-release.arn}",
+        "Payload.$": "$"
+      },
+      "ResultPath": null,
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+          "IntervalSeconds": 1, "MaxAttempts": 3, "BackoffRate": 2
+        }
+      ],
+      "Next": "MarkPaymentFailed"
+    },
+    "PackItems": {
+      "Type": "Map",
+      "Comment": "Map: one PackItem per item of the order, at most 3 at the same time.",
+      "ItemsPath": "$.items",
+      "MaxConcurrency": 3,
+      "ItemSelector": { "orderId.$": "$$.Execution.Name", "item.$": "$$.Map.Item.Value" },
+      "ItemProcessor": {
+        "ProcessorConfig": { "Mode": "INLINE" },
+        "StartAt": "PackItem",
+        "States": {
+          "PackItem": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${aws_lambda_function.order-pack-item.arn}",
+              "Payload.$": "$"
+            },
+            "OutputPath": "$.Payload",
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException", "Lambda.TooManyRequestsException"],
+                "IntervalSeconds": 1, "MaxAttempts": 3, "BackoffRate": 2
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.packages",
+      "Next": "CompleteOrder"
+    },
+    "CompleteOrder": {
+      "Type": "Parallel",
+      "Comment": "Parallel: the order is marked as completed and the event is published to SNS at the same time.",
+      "Branches": [
+        {
+          "StartAt": "MarkCompleted",
+          "States": {
+            "MarkCompleted": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "${aws_dynamodb_table.order-lab-data.name}",
+                "Key": { "pk": { "S": "ORDER" }, "sk": { "S.$": "$$.Execution.Name" } },
+                "UpdateExpression": "SET #status = :status, #packages = :packages, #paymentId = :paymentId, #updatedAt = :now",
+                "ExpressionAttributeNames": {
+                  "#status": "status", "#packages": "packages", "#paymentId": "paymentId", "#updatedAt": "updatedAt"
+                },
+                "ExpressionAttributeValues": {
+                  ":status": { "S": "COMPLETED" },
+                  ":packages": { "S.$": "States.JsonToString($.packages)" },
+                  ":paymentId": { "S.$": "$.payment.paymentId" },
+                  ":now": { "S.$": "$$.State.EnteredTime" }
+                }
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "PublishCompleted",
+          "States": {
+            "PublishCompleted": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${aws_sns_topic.order-events.arn}",
+                "Subject": "Order completed",
+                "Message.$": "States.Format('Order {} for {} completed. Lines: {}. Total: {}. Payment: {}.', $$.Execution.Name,$.customer, States.ArrayLength($.items), $.total, $.payment.paymentId)"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "ResultPath": null,
+      "Next": "OrderCompleted"
+    },
+    "OrderCompleted": { "Type": "Succeed" },
+    "MarkRejected": {
+      "Type": "Pass",
+      "Parameters": { "status": "REJECTED", "error": "OrderRejected", "cause.$": "States.JsonToString($.error)" },
+      "ResultPath": "$.outcome",
+      "Next": "RecordOutcome"
+    },
+    "MarkApprovalTimedOut": {
+      "Type": "Pass",
+      "Parameters": { "status": "APPROVAL_TIMED_OUT", "error": "ApprovalTimedOut", "cause.$": "States.JsonToString($.error)" },
+      "ResultPath": "$.outcome",
+      "Next": "RecordOutcome"
+    },
+    "MarkPaymentFailed": {
+      "Type": "Pass",
+      "Parameters": { "status": "PAYMENT_FAILED", "error": "PaymentFailed", "cause.$": "States.JsonToString($.error)" },
+      "ResultPath": "$.outcome",
+      "Next": "RecordOutcome"
+    },
+    "RecordOutcome": {
+      "Type": "Task",
+      "Comment": "UpdateItem also creates the record, for an order rejected before SaveOrder wrote it.",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${aws_dynamodb_table.order-lab-data.name}",
+        "Key": { "pk": { "S": "ORDER" }, "sk": { "S.$": "$$.Execution.Name" } },
+        "UpdateExpression": "SET #status = :status, #reason = :reason, #updatedAt = :now, #createdAt = if_not_exists(#createdAt, :started), #scenario = if_not_exists(#scenario, :scenario), #customer = if_not_exists(#customer, :customer) REMOVE #taskToken",
+        "ExpressionAttributeNames": {
+          "#status": "status", "#reason": "reason", "#updatedAt": "updatedAt", "#createdAt": "createdAt",
+          "#scenario": "scenario", "#customer": "customer", "#taskToken": "taskToken"
+        },
+        "ExpressionAttributeValues": {
+          ":status": { "S.$": "$.outcome.status" },
+          ":reason": { "S.$": "$.outcome.cause" },
+          ":now": { "S.$": "$$.State.EnteredTime" },
+          ":started": { "S.$": "$$.Execution.StartTime" },
+          ":scenario": { "S.$": "States.Format('{}', $.scenario)" },
+          ":customer": { "S.$": "States.Format('{}', $.customer)" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "OrderFailed"
+    },
+    "OrderFailed": {
+      "Type": "Fail",
+      "ErrorPath": "$.outcome.error",
+      "CausePath": "$.outcome.cause"
+    }
+  }
+}
