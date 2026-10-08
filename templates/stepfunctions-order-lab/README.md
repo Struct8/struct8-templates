@@ -56,11 +56,12 @@ descending order lists the newest orders first. No function scans the table.
 ### The functions
 
 - `v1/lambda/order-console/` — the page (`page.html`) and its API, behind a
-  Lambda Function URL. It starts executions with one of seven scenarios or an
-  order built on the page, follows an execution step by step from its history,
-  approves or rejects an order waiting for approval, and lists the
-  notifications. The products are written the first time the page loads, when
-  the table has none.
+  Lambda Function URL. The page opens on an order form: a name, the last 4
+  digits of a card and a quantity per product, with the total as you type.
+  Under it are seven ready-made scenarios. It follows an execution step by step
+  from its history, approves or rejects an order waiting for approval, and
+  lists the notifications. The products are written the first time the page
+  loads, when the table has none.
   Reads at runtime:
   - `AWS_DYNAMODB_TABLE_NAME_*` — the table.
   - `AWS_SFN_STATE_MACHINE_ARN_*` — the state machine it starts and reads.
@@ -91,6 +92,34 @@ type at the other end, the value, and the connection's label (`0` without one).
 The functions use the first variable of each prefix, in name order, so renaming
 a node or copying the template changes nothing in the code. The same
 connections grant the permissions.
+
+### Logs
+
+Each function writes one JSON object per line to its log group
+(`/aws/lambda/<function>`), next to the `START`, `END` and `REPORT` lines that
+Lambda writes. Every line has `level` (`INFO`, `WARN` or `ERROR`), `message`
+and `requestId`, and `traceId` when the function is traced. The workflow
+functions also write `orderId`, so one CloudWatch Logs Insights query over the
+seven log groups follows one order:
+
+```
+fields @timestamp, @log, level, message
+| filter orderId = "ord-..."
+| sort @timestamp asc
+```
+
+The customer name, the card digits and the approval task token are not
+logged. `order-console` logs every request except the two its page polls every
+few seconds, which it logs only when they fail.
+
+### Tracing
+
+The diagram has an X-Ray group connected to the seven functions, the state
+machine and the SNS topic, and it turns on active tracing in each of them. One
+order is one trace: the execution, each function it invokes, and the DynamoDB,
+SQS and SNS calls the workflow makes itself. The calls a function makes with the
+AWS SDK are not separate nodes of the trace: that needs the X-Ray SDK or the
+ADOT layer in the function, and this template installs nothing at deploy time.
 
 ### Notifications
 

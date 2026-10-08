@@ -13,13 +13,32 @@
 // Returns { items: [{ sku, qty }] }: what was reserved, which ReleaseStock
 // gives back if the payment fails.
 //
+// Logs the lines it reserves, then what was reserved and how long the
+// transaction took, or the SKUs short of stock.
+//
 // Reads at runtime:
 //   AWS_DYNAMODB_TABLE_NAME_* - set by the diagram from the connection to the
 //                               table. The first one in name order is used.
 
 import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
+import { Console } from 'node:console';
 
 const dynamodb = new DynamoDBClient({});
+
+// ---------------------------------------------------------------- Logs
+// One JSON object per line, written straight to stdout. The runtime's console
+// puts the time, the request id and the level in front of each line, which
+// makes it text; a line that is JSON from its first character is split into
+// fields by CloudWatch Logs Insights, so a query can filter on orderId or
+// level with no parse step. traceId is the X-Ray trace of the invocation, the
+// id the X-Ray console searches by.
+const out = new Console({ stdout: process.stdout, stderr: process.stderr });
+let requestId;
+
+function log(level, message, fields = {}) {
+  const traceId = /Root=([^;]+)/.exec(process.env._X_AMZN_TRACE_ID ?? '')?.[1];
+  out.log(JSON.stringify({ level, message, ...fields, requestId, traceId }));
+}
 
 function envByPrefix(prefix) {
   const key = Object.keys(process.env)
@@ -38,9 +57,12 @@ class OutOfStock extends Error {
   }
 }
 
-export const handler = async (order) => {
+export const handler = async (order, context) => {
+  requestId = context?.awsRequestId;
   const items = order.items ?? [];
+  const lines = items.map((item) => ({ sku: item.sku, qty: item.qty }));
   const now = new Date().toISOString();
+  log('INFO', 'Reserving stock', { orderId: order.orderId, items: lines });
 
   const stockUpdates = items.map((item) => ({
     Update: {
@@ -62,17 +84,32 @@ export const handler = async (order) => {
     },
   };
 
+  const started = Date.now();
   try {
     await dynamodb.send(new TransactWriteItemsCommand({ TransactItems: [...stockUpdates, orderUpdate] }));
   } catch (error) {
-    if (error.name !== 'TransactionCanceledException') throw error;
+    if (error.name !== 'TransactionCanceledException') {
+      log('ERROR', 'Stock reservation failed', { orderId: order.orderId, error: error.name, detail: error.message });
+      throw error;
+    }
     // One reason per transaction item, in the order they were sent.
     const reasons = error.CancellationReasons ?? [];
     const short = items.filter((_, index) => reasons[index]?.Code === 'ConditionalCheckFailed');
-    if (short.length === 0) throw error;
+    if (short.length === 0) {
+      log('ERROR', 'Stock transaction cancelled', {
+        orderId: order.orderId,
+        reasons: reasons.map((reason) => reason?.Code ?? 'None'),
+      });
+      throw error;
+    }
+    log('WARN', 'Not enough stock, nothing reserved', {
+      orderId: order.orderId,
+      short: short.map((item) => ({ sku: item.sku, qty: item.qty })),
+    });
     const list = short.map((item) => `${item.sku} (asked ${item.qty})`).join(', ');
     throw new OutOfStock(`Not enough stock for ${list}. Nothing was reserved.`);
   }
 
-  return { items: items.map((item) => ({ sku: item.sku, qty: item.qty })) };
+  log('INFO', 'Stock reserved', { orderId: order.orderId, items: lines, durationMs: Date.now() - started });
+  return { items: lines };
 };

@@ -10,13 +10,32 @@
 // A message that fails is reported in batchItemFailures, so SQS delivers only
 // that one again.
 //
+// Logs each order put on hold, and each message that failed. The task token is
+// never logged: whoever holds it can complete the step.
+//
 // Reads at runtime:
 //   AWS_DYNAMODB_TABLE_NAME_* - set by the diagram from the connection to the
 //                               table. The first one in name order is used.
 
 import { DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { Console } from 'node:console';
 
 const dynamodb = new DynamoDBClient({});
+
+// ---------------------------------------------------------------- Logs
+// One JSON object per line, written straight to stdout. The runtime's console
+// puts the time, the request id and the level in front of each line, which
+// makes it text; a line that is JSON from its first character is split into
+// fields by CloudWatch Logs Insights, so a query can filter on orderId or
+// level with no parse step. traceId is the X-Ray trace of the invocation, the
+// id the X-Ray console searches by.
+const out = new Console({ stdout: process.stdout, stderr: process.stderr });
+let requestId;
+
+function log(level, message, fields = {}) {
+  const traceId = /Root=([^;]+)/.exec(process.env._X_AMZN_TRACE_ID ?? '')?.[1];
+  out.log(JSON.stringify({ level, message, ...fields, requestId, traceId }));
+}
 
 function envByPrefix(prefix) {
   const key = Object.keys(process.env)
@@ -28,11 +47,17 @@ function envByPrefix(prefix) {
 
 const TABLE = envByPrefix('AWS_DYNAMODB_TABLE_NAME_');
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
+  requestId = context?.awsRequestId;
+  const records = event.Records ?? [];
+  log('INFO', 'Approval requests received', { messages: records.length });
+
   const batchItemFailures = [];
-  for (const record of event.Records ?? []) {
+  for (const record of records) {
+    let orderId;
     try {
       const message = JSON.parse(record.body);
+      orderId = message.orderId;
       if (!message.orderId || !message.taskToken) {
         throw new Error('The message has no orderId or taskToken.');
       }
@@ -49,8 +74,14 @@ export const handler = async (event) => {
           },
         })
       );
+      log('INFO', 'Order waiting for approval', { orderId, total: message.total, messageId: record.messageId });
     } catch (error) {
-      console.error(`Message ${record.messageId} failed: ${error.message}`);
+      log('ERROR', 'Approval request not stored; SQS delivers it again', {
+        orderId,
+        messageId: record.messageId,
+        error: error.name,
+        detail: error.message,
+      });
       batchItemFailures.push({ itemIdentifier: record.messageId });
     }
   }
