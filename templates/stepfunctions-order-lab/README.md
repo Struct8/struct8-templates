@@ -93,6 +93,17 @@ The functions use the first variable of each prefix, in name order, so renaming
 a node or copying the template changes nothing in the code. The same
 connections grant the permissions.
 
+Each connection's policy holds only the actions the code at its origin calls:
+
+| From | To | Actions |
+|---|---|---|
+| `order-reserve`, `order-release`, `order-approval-inbox` | table | `UpdateItem` (the transactions of the first two hold only updates, and IAM authorizes a transaction item by item) |
+| `order-console` | table | `Query`, `GetItem`, `PutItem`, `UpdateItem` |
+| `order-console` | state machine | `StartExecution`; `DescribeExecution` and `GetExecutionHistory` on its executions; `SendTaskSuccess` and `SendTaskFailure` on `*`, the only resource IAM accepts for them |
+| `order-console` | notifications queue | `ReceiveMessage`, `DeleteMessage` (which also authorizes `DeleteMessageBatch`) |
+| state machine | table | `PutItem`, `UpdateItem` |
+| state machine | approvals queue | `SendMessage` |
+
 ### Logs
 
 Each function writes one JSON object per line to its log group
@@ -116,10 +127,22 @@ few seconds, which it logs only when they fail.
 
 The diagram has an X-Ray group connected to the seven functions, the state
 machine and the SNS topic, and it turns on active tracing in each of them. One
-order is one trace: the execution, each function it invokes, and the DynamoDB,
-SQS and SNS calls the workflow makes itself. The calls a function makes with the
-AWS SDK are not separate nodes of the trace: that needs the X-Ray SDK or the
-ADOT layer in the function, and this template installs nothing at deploy time.
+order is one trace: the execution, each function it invokes, the DynamoDB, SQS
+and SNS calls the workflow makes itself, and the calls the functions make.
+
+Active tracing records a Lambda invocation and nothing inside it. The four
+functions that call AWS (`order-reserve`, `order-release`,
+`order-approval-inbox`, `order-console`) wrap each SDK client with `traceCalls`
+from `xray.mjs`, which records every call as a subsegment of the invocation,
+named after the table, queue or state machine it reaches. That name is the node
+the X-Ray service map draws, and the one the X-Ray layer of the Struct8 canvas
+matches to the diagram. The subsegment goes over UDP to the X-Ray daemon that
+Lambda runs beside the function, so there is no dependency and no layer. Each
+subsegment carries the operation as the `operation` annotation, and a failed
+call carries its exception.
+
+`xray.mjs` is the same file in each of those folders, because the apply zips
+each folder on its own.
 
 ### Notifications
 
