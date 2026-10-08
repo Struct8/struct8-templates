@@ -48,10 +48,13 @@ import { DeleteMessageBatchCommand, ReceiveMessageCommand, SQSClient } from '@aw
 import { Console } from 'node:console';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { traceCalls } from './xray.mjs';
 
-const dynamodb = new DynamoDBClient({});
-const sfn = new SFNClient({});
-const sqs = new SQSClient({});
+// Each call is recorded in X-Ray under the name of the resource it reaches:
+// see xray.mjs.
+const dynamodb = traceCalls(new DynamoDBClient({}), () => TABLE);
+const sfn = traceCalls(new SFNClient({}), () => STATE_MACHINE_ARN.split(':').pop());
+const sqs = traceCalls(new SQSClient({}), () => NOTIFICATIONS_QUEUE);
 const REGION = process.env.AWS_REGION;
 const PAGE = readFileSync(new URL('./page.html', import.meta.url), 'utf8');
 

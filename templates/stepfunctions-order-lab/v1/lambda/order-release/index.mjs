@@ -13,8 +13,10 @@
 
 import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
 import { Console } from 'node:console';
+import { traceCalls } from './xray.mjs';
 
-const dynamodb = new DynamoDBClient({});
+// Each call is recorded in X-Ray under the table's name: see xray.mjs.
+const dynamodb = traceCalls(new DynamoDBClient({}), () => TABLE);
 
 // ---------------------------------------------------------------- Logs
 // One JSON object per line, written straight to stdout. The runtime's console
