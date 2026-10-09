@@ -1,7 +1,9 @@
 // Chat endpoint of the bedrock-agent-lab template, behind a Lambda Function URL.
 //
-// GET with no question returns a small page with a form. A question goes to
-// the AgentCore harness, either as GET ?q=... or as a POST with a JSON body:
+// GET with no question returns a chat page. It shows the conversation of the
+// browser tab, keeps it across a reload, and New chat clears it and starts
+// another session. A question goes to the AgentCore harness, either as
+// GET ?q=... or as a POST with a JSON body:
 //   { "question": "...", "sessionId": "...", "actorId": "..." }
 // Only "question" is required. The same sessionId continues a conversation;
 // the same actorId is the same customer, whose session summaries the memory
@@ -70,28 +72,78 @@ const PAGE = `<!doctype html>
 <title>Order desk agent</title>
 <style>
   body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
-  label { display: block; margin: 0 0 1rem; }
-  textarea, input[type=text] { width: 100%; box-sizing: border-box; font: inherit; }
-  pre { white-space: pre-wrap; background: #f4f4f4; padding: 1rem; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  h1 { margin: 0; }
+  #chat { display: flex; flex-direction: column; gap: 0.75rem; margin: 1.5rem 0 1rem; }
+  #chat:empty::before { content: 'Ask about an order, for example: What is the status of order 1001?'; color: #666; }
+  .message { max-width: 85%; padding: 0.5rem 0.75rem; border-radius: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .question { align-self: flex-end; background: #dbeafe; }
+  .answer { align-self: flex-start; background: #f1f1f1; }
+  .error { align-self: flex-start; background: #fde2e2; }
+  .details { display: block; margin-top: 0.25rem; font-size: 0.8rem; color: #555; }
+  form { display: flex; gap: 0.5rem; align-items: flex-end; }
+  textarea { flex: 1; min-width: 0; box-sizing: border-box; font: inherit; }
+  label { display: block; margin-top: 1rem; font-size: 0.9rem; }
+  input[type=text] { width: 100%; box-sizing: border-box; font: inherit; }
+  small { color: #555; }
 </style>
 </head>
 <body>
-<h1>Order desk agent</h1>
+<header>
+  <h1>Order desk agent</h1>
+  <button type="button" id="reset">New chat</button>
+</header>
+<div id="chat" aria-live="polite"></div>
 <form id="ask">
-  <label>Question
-    <textarea id="question" rows="3" required>What is the status of order 1001?</textarea>
-  </label>
-  <label>Actor id (the same value is the same customer across sessions)
-    <input type="text" id="actor" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}">
-  </label>
-  <button>Ask</button>
+  <textarea id="question" rows="2" required aria-label="Question"
+    placeholder="Type a question. Enter sends it, Shift+Enter starts a new line."></textarea>
+  <button id="send">Send</button>
 </form>
-<p>Session: <code id="session">new</code> <button type="button" id="reset">New session</button></p>
-<pre id="answer"></pre>
-<p id="details"></p>
+<p><small>Session: <code id="session">new</code></small></p>
+<label>Actor id (the same value is the same customer across sessions)
+  <input type="text" id="actor" pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,63}">
+</label>
 <script>
-  let sessionId = '';
   const byId = (id) => document.getElementById(id);
+  const chat = byId('chat');
+  const question = byId('question');
+
+  // The conversation of this tab, in sessionStorage: a reload shows it again,
+  // and New chat or closing the tab ends it.
+  const stored = (key) => { try { return sessionStorage.getItem(key); } catch { return null; } };
+  let sessionId = stored('sessionId') || '';
+  let messages = [];
+  try { messages = JSON.parse(stored('messages') || '[]'); } catch {}
+  const save = () => {
+    try {
+      sessionStorage.setItem('sessionId', sessionId);
+      sessionStorage.setItem('messages', JSON.stringify(messages));
+    } catch {}
+  };
+  const showSession = () => { byId('session').textContent = sessionId || 'new'; };
+
+  function render(message) {
+    const item = document.createElement('div');
+    item.className = 'message ' + message.kind;
+    item.textContent = message.text;
+    if (message.details) {
+      const details = document.createElement('span');
+      details.className = 'details';
+      details.textContent = message.details;
+      item.appendChild(details);
+    }
+    chat.appendChild(item);
+    item.scrollIntoView({ block: 'end' });
+    return item;
+  }
+  function add(message) {
+    messages.push(message);
+    save();
+    return render(message);
+  }
+  messages.forEach(render);
+  showSession();
+
   // Each browser starts as a customer of its own, kept in this browser between visits.
   const actor = byId('actor');
   try { actor.value = localStorage.getItem('actorId') || ''; } catch {}
@@ -99,27 +151,59 @@ const PAGE = `<!doctype html>
   const saveActor = () => { try { localStorage.setItem('actorId', actor.value); } catch {} };
   saveActor();
   actor.onchange = saveActor;
-  byId('reset').onclick = () => { sessionId = ''; byId('session').textContent = 'new'; };
+
+  byId('reset').onclick = () => {
+    sessionId = '';
+    messages = [];
+    try { sessionStorage.removeItem('sessionId'); sessionStorage.removeItem('messages'); } catch {}
+    chat.replaceChildren();
+    showSession();
+    question.focus();
+  };
+
+  question.onkeydown = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      byId('ask').requestSubmit();
+    }
+  };
+
   byId('ask').onsubmit = async (event) => {
     event.preventDefault();
-    byId('answer').textContent = '...';
-    byId('details').textContent = '';
-    const response = await fetch(location.pathname, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question: byId('question').value, sessionId, actorId: byId('actor').value })
-    });
-    const result = await response.json();
+    const text = question.value.trim();
+    if (!text || byId('send').disabled) return;
+    add({ kind: 'question', text });
+    question.value = '';
+    byId('send').disabled = true;
+    const pending = render({ kind: 'answer', text: '...' });
+    let result;
+    try {
+      const response = await fetch(location.pathname, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: text, sessionId, actorId: actor.value })
+      });
+      result = await response.json();
+    } catch {
+      result = { error: 'The question did not reach the agent. Send it again.' };
+    }
+    pending.remove();
+    byId('send').disabled = false;
     if (result.sessionId) {
       sessionId = result.sessionId;
-      byId('session').textContent = sessionId;
+      showSession();
     }
-    byId('answer').textContent = result.answer ?? result.error;
+    if (typeof result.answer !== 'string') {
+      add({ kind: 'error', text: result.error || 'The agent returned no answer.' });
+      return;
+    }
+    let details = '';
     if (result.guardrail) {
       const tools = result.tools && result.tools.length ? result.tools.join(', ') : 'none';
-      byId('details').textContent = 'Tools called: ' + tools + '. Guardrail on the question: ' +
+      details = 'Tools called: ' + tools + '. Guardrail on the question: ' +
         result.guardrail.question + '; on the answer: ' + result.guardrail.answer + '.';
     }
+    add({ kind: 'answer', text: result.answer || 'The agent returned an empty answer.', details });
   };
 </script>
 </body>
