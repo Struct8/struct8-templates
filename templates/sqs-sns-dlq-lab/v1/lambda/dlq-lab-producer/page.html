@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SNS, SQS and dead-letter queue lab</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #5f6b7a; --line: #dde2e8;
+    --accent: #3b5bdb; --ok: #2b8a3e; --bad: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --card: #1c2027; --text: #e6e9ee; --muted: #9aa5b4; --line: #2e343e;
+      --accent: #748ffc; --ok: #51cf66; --bad: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif; }
+  header { padding: 1.25rem 1rem; border-bottom: 1px solid var(--line); background: var(--card); }
+  header h1 { margin: 0; font-size: 1.3rem; }
+  header p { margin: 0.25rem 0 0; color: var(--muted); }
+  main { display: grid; gap: 1rem; padding: 1rem; max-width: 1100px; margin: 0 auto; grid-template-columns: 1fr; }
+  @media (min-width: 1000px) { main { grid-template-columns: 3fr 2fr; } }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem; min-width: 0; }
+  section h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+  p { margin: 0 0 0.75rem; }
+  .muted { color: var(--muted); }
+  .ok { color: var(--ok); }
+  .bad { color: var(--bad); }
+  .scenarios { display: grid; gap: 0.5rem; }
+  .scenario { text-align: left; padding: 0.65rem 0.8rem; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
+  .scenario:hover { border-color: var(--accent); }
+  .scenario:disabled { opacity: 0.6; cursor: progress; }
+  .scenario strong { display: block; }
+  .scenario span { display: block; color: var(--muted); font-size: 0.87rem; }
+  #result { margin-top: 1rem; }
+  #result:empty { display: none; }
+  .expect { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+  .expect li { padding: 0.45rem 0; border-bottom: 1px solid var(--line); }
+  .expect strong { display: block; }
+  pre { white-space: pre-wrap; word-break: break-all; margin: 0; padding: 0.6rem 0.75rem; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.45rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .scroll { overflow-x: auto; }
+  ul.links { margin: 0 0 0.75rem; padding-left: 1.1rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>SNS, SQS and dead-letter queue lab</h1>
+  <p id="target">Each message published here goes to the orders topic.</p>
+</header>
+<main>
+  <section>
+    <h2>Send a message</h2>
+    <p>The orders topic delivers a copy of each message to Track 1, Track 2a and Track 2b. Each track retries in its own way and has its own dead-letter queue. The <code>behavior</code> field of the message tells the consumers to succeed or to fail.</p>
+    <div class="scenarios">
+      <button class="scenario" type="button" data-scenario="ok"><strong>Send a message that succeeds</strong><span>Every consumer processes it at the first delivery.</span></button>
+      <button class="scenario" type="button" data-scenario="fail"><strong>Send a message that always fails</strong><span>Fails at every delivery, in every track.</span></button>
+      <button class="scenario" type="button" data-scenario="fail-times"><strong>Send a message that fails twice, then succeeds</strong><span>Track 1 counts deliveries and processes it the third time. Tracks 2a and 2b do not count deliveries, so there it always fails.</span></button>
+      <button class="scenario" type="button" data-scenario="slow"><strong>Send a message that times out</strong><span>The consumer waits past its 10-second timeout. In Track 1, the whole batch comes back.</span></button>
+      <button class="scenario" type="button" data-scenario="batch"><strong>Send ten messages, one of them failing</strong><span>Only the message that asks fails. The other nine are processed.</span></button>
+    </div>
+    <div id="result" aria-live="polite"></div>
+  </section>
+
+  <section>
+    <h2>Where to look</h2>
+    <ul class="links" id="links">
+      <li>Dead-letter queues: the SQS console.</li>
+      <li>The alarm on the Track 1 dead-letter queue: CloudWatch alarms.</li>
+      <li>What each consumer did: its log, from the Lambda console.</li>
+    </ul>
+    <p class="muted">A message stays in a dead-letter queue until it is deleted. The alarm stays in ALARM while the Track 1 dead-letter queue holds any message.</p>
+    <p class="muted">Track 4 publishes a message that succeeds every minute, so each consumer also runs once a minute with no click here.</p>
+  </section>
+
+  <section style="grid-column: 1 / -1">
+    <h2>The tracks, with the settings this template ships</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Track</th><th>Path</th><th>Retries</th><th>Where a failed message goes</th></tr></thead>
+        <tbody>
+          <tr><td>1 — queue redrive</td><td>topic → queue → event source mapping → function</td><td>The queue delivers it again when its 60-second visibility timeout ends, 3 receives in all.</td><td>The dead-letter queue of the queue, watched by an alarm.</td></tr>
+          <tr><td>2a — on-failure destination</td><td>topic → function, invoked asynchronously</td><td>None: the asynchronous invocation settings allow 0 retries.</td><td>The on-failure destination queue, as a record with the request and the error.</td></tr>
+          <tr><td>2b — Lambda dead-letter queue</td><td>topic → function, invoked asynchronously</td><td>2, the Lambda default, minutes apart.</td><td>The dead-letter queue of the function, with the error in the message attributes.</td></tr>
+          <tr><td>4 — schedule delivery</td><td>schedule → topic, every minute</td><td>None.</td><td>Its dead-letter queue receives only what the schedule could not deliver to the topic. Nothing sent from this page reaches it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+(function () {
+  var result = document.getElementById('result');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('button[data-scenario]'));
+
+  // What each scenario sends, and what each track does with it.
+  var SCENARIOS = {
+    ok: {
+      body: function (id) { return { id: id, behavior: 'ok' }; },
+      expect: [
+        ['Track 1', 'Processed at the first delivery. Nothing reaches the dead-letter queue.'],
+        ['Track 2a', 'Processed at the first invocation. Nothing reaches the on-failure destination.'],
+        ['Track 2b', 'Processed at the first invocation. Nothing reaches the dead-letter queue.']
+      ]
+    },
+    fail: {
+      body: function (id) { return { id: id, behavior: 'fail' }; },
+      expect: [
+        ['Track 1', 'Received 3 times, about a minute apart, then moved to the dead-letter queue: about 3 minutes in all. The alarm goes to ALARM a few minutes after that.'],
+        ['Track 2a', 'One invocation, then a record in the on-failure destination queue within seconds.'],
+        ['Track 2b', 'Three invocations, then the message in the dead-letter queue of the function: about 3 minutes in all.']
+      ]
+    },
+    'fail-times': {
+      body: function (id) { return { id: id, behavior: 'fail-times:2' }; },
+      expect: [
+        ['Track 1', 'Fails at the 1st and 2nd receive and is processed at the 3rd, about 2 minutes later. Nothing reaches the dead-letter queue.'],
+        ['Track 2a', 'An asynchronous invocation carries no delivery count, so it fails like a message that always fails: a record in the on-failure destination within seconds.'],
+        ['Track 2b', 'No delivery count here either: the dead-letter queue after three invocations, about 3 minutes.']
+      ]
+    },
+    slow: {
+      body: function (id) { return { id: id, behavior: 'slow' }; },
+      expect: [
+        ['Track 1', 'The consumer times out, so the queue delivers the whole batch again, messages already processed included. After 3 receives the message goes to the dead-letter queue.'],
+        ['Track 2a', 'A timeout fails the invocation: a record in the on-failure destination seconds after it.'],
+        ['Track 2b', 'Each invocation times out: the dead-letter queue after three, about 3 minutes.']
+      ]
+    },
+    batch: {
+      body: function (id) {
+        var list = [];
+        for (var i = 1; i <= 10; i++) list.push({ id: id + '-' + i, behavior: i === 5 ? 'fail' : 'ok' });
+        return list;
+      },
+      expect: [
+        ['Track 1', 'Only message 5 comes back to the queue, and after 3 receives it goes to the dead-letter queue. The other nine are processed once.'],
+        ['Track 2a', 'Each message is an invocation of its own. Only message 5 reaches the on-failure destination.'],
+        ['Track 2b', 'Each message is an invocation of its own. Only message 5 reaches the dead-letter queue, after three invocations.']
+      ]
+    }
+  };
+
+  function el(tag, text, cls) {
+    var node = document.createElement(tag);
+    if (text !== undefined) node.textContent = text;
+    if (cls) node.className = cls;
+    return node;
+  }
+
+  // A short id, so the message can be found in a queue or a log.
+  function newId() { return Math.random().toString(36).slice(2, 8); }
+
+  function show(scenario, body, status, answer, error) {
+    result.textContent = '';
+    var time = new Date().toLocaleTimeString();
+    if (error) {
+      result.appendChild(el('p', 'The request did not reach this function: ' + error, 'bad'));
+    } else if (status !== 200 || !answer) {
+      result.appendChild(el('p', 'Nothing was published. This function answered ' + status + ((answer && answer.error) ? ': ' + answer.error : '.'), 'bad'));
+    } else {
+      var n = answer.published.length;
+      result.appendChild(el('p', (n === 1 ? 'Published 1 message' : 'Published ' + n + ' messages') + ' to ' + answer.topic + ' at ' + time + '.', 'ok'));
+      if (answer.failed && answer.failed.length) {
+        result.appendChild(el('p', answer.failed.length + ' not published: ' + answer.failed[0].error, 'bad'));
+      }
+      var list = el('ul', undefined, 'expect');
+      SCENARIOS[scenario].expect.forEach(function (row) {
+        var item = el('li');
+        item.appendChild(el('strong', row[0]));
+        item.appendChild(el('span', row[1]));
+        list.appendChild(item);
+      });
+      result.appendChild(el('h2', 'What to expect'));
+      result.appendChild(list);
+    }
+    result.appendChild(el('p', 'Request body. A POST to this address with the same body has the same effect:', 'muted'));
+    result.appendChild(el('pre', body));
+  }
+
+  function send(scenario) {
+    var body = JSON.stringify(SCENARIOS[scenario].body(newId()));
+    buttons.forEach(function (b) { b.disabled = true; });
+    result.textContent = '';
+    result.appendChild(el('p', 'Sending…', 'muted'));
+    fetch(location.pathname, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body })
+      .then(function (r) {
+        return r.json().catch(function () { return null; }).then(function (answer) { show(scenario, body, r.status, answer); });
+      })
+      .catch(function (e) { show(scenario, body, 0, null, String((e && e.message) || e)); })
+      .then(function () { buttons.forEach(function (b) { b.disabled = false; }); });
+  }
+
+  buttons.forEach(function (b) {
+    b.addEventListener('click', function () { send(b.getAttribute('data-scenario')); });
+  });
+
+  // The topic, the region and the console links come from this function.
+  function link(text, href, rest) {
+    var item = el('li');
+    var a = el('a', text);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    item.appendChild(a);
+    if (rest) item.appendChild(document.createTextNode(rest));
+    return item;
+  }
+
+  fetch('/api/info').then(function (r) { return r.ok ? r.json() : null; }).then(function (info) {
+    if (!info) return;
+    document.getElementById('target').textContent =
+      'Each message published here goes to the topic ' + info.topic + ', in ' + info.region + '.';
+    var links = document.getElementById('links');
+    links.textContent = '';
+    links.appendChild(link('SQS queues', info.console.queues, ': the dead-letter queues, and the queue of Track 1.'));
+    links.appendChild(link('CloudWatch alarms', info.console.alarms, ': the alarm on the Track 1 dead-letter queue.'));
+    links.appendChild(link('Lambda functions', info.console.functions, ': what each consumer did, in its log.'));
+  }).catch(function () {});
+})();
+</script>
+</body>
+</html>
