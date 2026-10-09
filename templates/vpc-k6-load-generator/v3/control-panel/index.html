@@ -106,6 +106,7 @@
     .summary { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 8px; flex-wrap: wrap; gap: 4px 12px; }
     .table-tools { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
     .table-tools .lbl { font-size: 12px; color: var(--muted); }
+    .table-tools .presets { display: contents; }
   </style>
 </head>
 <body>
@@ -169,23 +170,27 @@
           </div>
         </div>
 
-        <div class="field curve-only" hidden>
-          <label id="stagesLabel">Load profile</label>
-          <div class="stages-wrap">
-            <table class="stages" aria-labelledby="stagesLabel">
-              <thead><tr><th scope="col">#</th><th scope="col">At</th><th scope="col">VUs</th><th scope="col">Ramp</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
-              <tbody id="stageRows"></tbody>
-            </table>
+        <div id="curvePointsSlot">
+          <div class="field editor-only" id="pointsField" hidden>
+            <label id="stagesLabel">Load profile</label>
+            <div class="stages-wrap">
+              <table class="stages" aria-labelledby="stagesLabel">
+                <thead><tr><th scope="col">#</th><th scope="col">At</th><th scope="col" id="levelHead">VUs</th><th scope="col">Ramp</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
+                <tbody id="stageRows"></tbody>
+              </table>
+            </div>
+            <div class="table-tools">
+              <button type="button" class="btn-ghost" id="addPoint">+ Add point</button>
+              <span class="presets curve-only">
+                <span class="lbl">Presets:</span>
+                <button type="button" class="chip" data-preset="ramp">ramp</button>
+                <button type="button" class="chip" data-preset="spike">spike</button>
+                <button type="button" class="chip" data-preset="step">step</button>
+                <button type="button" class="chip" data-preset="soak">soak</button>
+              </span>
+            </div>
+            <div class="summary" id="curveSummary" aria-live="polite"></div>
           </div>
-          <div class="table-tools">
-            <button type="button" class="btn-ghost" id="addPoint">+ Add point</button>
-            <span class="lbl">Presets:</span>
-            <button type="button" class="chip" data-preset="ramp">ramp</button>
-            <button type="button" class="chip" data-preset="spike">spike</button>
-            <button type="button" class="chip" data-preset="step">step</button>
-            <button type="button" class="chip" data-preset="soak">soak</button>
-          </div>
-          <div class="summary" id="curveSummary" aria-live="polite"></div>
         </div>
 
         <div class="wordpress-only" hidden>
@@ -197,12 +202,13 @@
                 <option value="spike">Spike</option>
                 <option value="soak">Soak</option>
                 <option value="smoke">Smoke test</option>
+                <option value="curve">Custom</option>
               </select>
               <div class="hint" id="wpProfileHint"></div>
             </div>
             <div class="field wp-peak">
               <label for="wpPeak">Peak (new visits per second)</label>
-              <input id="wpPeak" type="number" min="1" value="10" aria-describedby="wpPeakHint" />
+              <input id="wpPeak" type="number" min="0.1" step="0.1" value="10" aria-describedby="wpPeakHint" />
               <div class="hint" id="wpPeakHint">A visit reads 1 to 6 pages, 2.6 on average.</div>
             </div>
           </div>
@@ -221,6 +227,7 @@
               <input id="wpSoakTime" value="30m" />
             </div>
           </div>
+          <div id="wpPointsSlot"></div>
           <div class="row">
             <div class="field">
               <label for="wpThinkMin">Reading time per page, minimum (s)</label>
@@ -235,7 +242,6 @@
             <label class="check"><input id="wpAssets" type="checkbox" /> Also download images, CSS and JS</label>
             <div class="hint">Off by default: behind a CDN they come from its cache and never reach WordPress.</div>
           </div>
-          <div class="summary" id="wpSummary" aria-live="polite"></div>
         </div>
 
         <div class="field request-only">
@@ -252,7 +258,7 @@
     </section>
 
     <div class="right-col">
-      <section class="card curve-only" aria-labelledby="curve-title" hidden>
+      <section class="card editor-only" aria-labelledby="curve-title" hidden>
         <h2 id="curve-title">Load curve <span class="sub">— click to add a point, drag to shape it</span></h2>
         <svg id="curve" class="curve-svg" viewBox="0 0 640 280" role="img" aria-labelledby="curveDesc">
           <desc id="curveDesc">Virtual users over time. The same points are editable in the Load profile table.</desc>
@@ -281,11 +287,12 @@
     let running = null;
     let dashPort = 5665;
     let suggestionsShown = false;
-    let limits = { maxVus: 500, maxDurationSeconds: 3600, maxPoints: 50 };
+    let limits = { maxVus: 500, maxDurationSeconds: 3600, maxPoints: 50, maxRate: 100 };
     const storedMode = localStorage.getItem("k6PanelMode");
     let mode = storedMode === "curve" || storedMode === "wordpress" ? storedMode : "constant";
     let runStartedAt = null;   // client clock, to draw progress on the curve
     let runCurveTotal = 0;
+    let runMode = null;        // the curve the run follows, so the other curve gets no progress line
 
     els.token.value = sessionStorage.getItem("k6PanelToken") || "";
 
@@ -338,51 +345,20 @@
       document.querySelectorAll(".constant-only").forEach((el) => { el.hidden = mode !== "constant"; });
       document.querySelectorAll(".curve-only").forEach((el) => { el.hidden = mode !== "curve"; });
       document.querySelectorAll(".wordpress-only").forEach((el) => { el.hidden = mode !== "wordpress"; });
+      document.querySelectorAll(".editor-only").forEach((el) => { el.hidden = !editors[mode]; });
       document.querySelectorAll(".request-only").forEach((el) => { el.hidden = mode === "wordpress"; });
       $("targetHint").innerHTML = mode === "wordpress" ? TARGET_HINTS.wordpress : TARGET_HINTS.request;
       if (mode === "wordpress") $("methodNote").hidden = true;
       document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
-      if (mode === "curve") renderCurve();
-      if (mode === "wordpress") renderWordpress();
-    }
-
-    // ---------- WordPress scenario ----------
-    // The run lengths mirror how wordpress.js lays out its stages (and the server's cap check).
-    const PROFILE_HINTS = {
-      steps: "Climbs to the peak in equal steps and holds each one, so the autoscaling has time to act.",
-      spike: "3 min at a fifth of the peak, then the peak within 30 s for 5 min, then back down.",
-      soak: "5 min to reach the peak, then holds it. Finds what only shows up over time.",
-      smoke: "1 visit per second for 2 min: checks that the site and the scenario work before a real run.",
-    };
-    function wordpressSeconds() {
-      const profile = $("wpProfile").value;
-      if (profile === "smoke") return 120;
-      if (profile === "spike") return 180 + 30 + 300 + 60 + 300;
-      if (profile === "soak") return 300 + parseDur($("wpSoakTime").value) + 120;
-      return Number($("wpSteps").value) * (60 + parseDur($("wpStepTime").value)) + 60;
-    }
-    function renderWordpress() {
-      const profile = $("wpProfile").value;
-      $("wpProfileHint").textContent = PROFILE_HINTS[profile] || "";
-      document.querySelectorAll(".wp-steps").forEach((el) => { el.hidden = profile !== "steps"; });
-      document.querySelectorAll(".wp-soak").forEach((el) => { el.hidden = profile !== "soak"; });
-      document.querySelectorAll(".wp-peak").forEach((el) => { el.hidden = profile === "smoke"; });
-      const seconds = wordpressSeconds();
-      const peak = profile === "smoke" ? 1 : Number($("wpPeak").value);
-      const summary = $("wpSummary");
-      summary.replaceChildren();
-      const total = document.createElement("span");
-      total.textContent = Number.isFinite(seconds) ? `Total: ${fmtDur(seconds)}` : "Total: check the times";
-      if (Number.isFinite(seconds) && seconds > limits.maxDurationSeconds) {
-        total.textContent += ` (over this panel's ${Math.round(limits.maxDurationSeconds / 60)} min)`;
-        total.style.color = "var(--stop)";
+      if (editors[mode]) {
+        ed = editors[mode];
+        // One points table serves both curves; it sits in the form of the mode on screen.
+        $(mode === "wordpress" ? "wpPointsSlot" : "curvePointsSlot").append($("pointsField"));
+        $("levelHead").textContent = ed.unit.title;
+        if (mode === "wordpress") renderWordpressFields();
+        renderCurve();
       }
-      const pages = document.createElement("span");
-      pages.textContent = peak > 0 ? `At the peak: about ${Math.round(peak * 2.6)} pages/s` : "";
-      summary.append(total, pages);
     }
-    ["wpProfile", "wpPeak", "wpSteps", "wpStepTime", "wpSoakTime"].forEach((id) =>
-      $(id).addEventListener("input", renderWordpress));
     document.querySelectorAll("input[name=mode]").forEach((r) => r.addEventListener("change", () => {
       mode = r.value;
       localStorage.setItem("k6PanelMode", mode);
@@ -390,17 +366,33 @@
       applyMode();
     }));
 
-    // ---------- curve model ----------
-    // Points are in ABSOLUTE time: {t: seconds since start, vus}. The server turns them into k6 stages.
-    let points = [];
-    let activeIndex = -1;
-    let axisSeconds = 360;
-    let axisVus = 100;
+    // ---------- curve editors ----------
+    // Curve draws VUs over time; WordPress draws new visits per second over time. Each keeps its own
+    // points and axes. Points are in ABSOLUTE time -- {t: seconds since start, v: level} -- and the
+    // server turns them into k6 stages.
+    const editors = {
+      curve: { points: [], active: -1, axisSeconds: 360, axisMax: 100, unit: {
+        title: "VUs", name: "VUs", long: "Virtual users", minAxis: 10, inputStep: "1",
+        max: () => limits.maxVus, step: () => 1 } },
+      wordpress: { points: [], active: -1, axisSeconds: 360, axisMax: 10, stale: false, unit: {
+        title: "Visits/s", name: "visits/s", long: "New visits per second", minAxis: 2, inputStep: "0.1",
+        max: () => limits.maxRate,
+        // Fractions matter at the low end: 0.5 is one new visit every two seconds.
+        step: (e) => (e.axisMax <= 5 ? 0.1 : e.axisMax <= 25 ? 0.5 : 1) } },
+    };
+    let ed = editors.curve;
 
-    const snapStep = () => (axisSeconds <= 120 ? 1 : axisSeconds <= 900 ? 5 : 15);
+    const snapStep = () => (ed.axisSeconds <= 120 ? 1 : ed.axisSeconds <= 900 ? 5 : 15);
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    const tenth = (x) => Math.round(x * 10) / 10;
+    const fmtV = (v) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
+    // Rounds a level to the editor's step; toFixed drops the binary noise of sums like 0.1 * 3.
+    function snapV(e, v) {
+      const s = e.unit.step(e);
+      return clamp(Number((Math.round(v / s) * s).toFixed(1)), 0, e.unit.max());
+    }
     function niceCeil(v) {
-      const steps = [10, 20, 25, 50, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1500, 2000];
+      const steps = [2, 2.5, 5, 10, 20, 25, 50, 100, 150, 200, 250, 300, 400, 500, 750, 1000, 1500, 2000];
       return steps.find((s) => s >= v) || Math.ceil(v / 500) * 500;
     }
     function niceTime(v) {
@@ -408,16 +400,18 @@
       return steps.find((s) => s >= v) || Math.ceil(v / 3600) * 3600;
     }
     // Axes follow the curve with some headroom, so there is always room to drag a point further.
-    function fitAxes() {
-      const lastT = points.length ? points[points.length - 1].t : 0;
-      axisSeconds = Math.min(limits.maxDurationSeconds, niceTime(Math.max(60, lastT * 1.2)));
-      if (axisSeconds < lastT) axisSeconds = lastT;
-      const peak = points.length ? Math.max(...points.map((p) => p.vus)) : 0;
-      axisVus = Math.min(limits.maxVus, niceCeil(Math.max(10, peak * 1.3)));
-      if (axisVus < peak) axisVus = peak;
+    function fitAxes(e = ed) {
+      const lastT = e.points.length ? e.points[e.points.length - 1].t : 0;
+      e.axisSeconds = Math.min(limits.maxDurationSeconds, niceTime(Math.max(60, lastT * 1.2)));
+      if (e.axisSeconds < lastT) e.axisSeconds = lastT;
+      const peak = e.points.length ? Math.max(...e.points.map((p) => p.v)) : 0;
+      e.axisMax = Math.min(e.unit.max(), niceCeil(Math.max(e.unit.minAxis, peak * 1.3)));
+      if (e.axisMax < peak) e.axisMax = peak;
     }
 
+    // The Curve mode's presets, in VUs.
     function preset(name) {
+      const e = editors.curve;
       const P = Math.min(100, limits.maxVus);
       const L = Math.min(name === "soak" ? 1800 : 360, limits.maxDurationSeconds);
       // Times land on 5s marks so the table reads 2m, not 1m59s. The "+ 1" of a step survives
@@ -432,10 +426,76 @@
                [rt(L * 3 / 4), P * 0.75], [rt(L * 3 / 4) + 1, P], [rt(L), P]],
         soak: [[0, 0], [rt(Math.min(120, L * 0.1)), P * 0.5], [rt(L - Math.min(120, L * 0.1)), P * 0.5], [rt(L), 0]],
       };
-      points = shapes[name].map(([t, v]) => ({ t: Math.min(t, limits.maxDurationSeconds), vus: r(v) }));
-      activeIndex = -1;
-      fitAxes();
-      renderCurve();
+      e.points = shapes[name].map(([t, v]) => ({ t: Math.min(t, limits.maxDurationSeconds), v: r(v) }));
+      e.active = -1;
+      fitAxes(e);
+      if (ed === e) renderCurve();
+    }
+
+    // ---------- WordPress shapes ----------
+    // The four shapes are drawn as points of the WordPress curve. The page always sends the points,
+    // never the shape's name, so what is drawn is what runs; moving a point turns the shape into Custom.
+    const PROFILE_HINTS = {
+      steps: "Climbs to the peak in equal steps and holds each one, so the autoscaling has time to act.",
+      spike: "3 min at a fifth of the peak, then the peak within 30 s for 5 min, then back down.",
+      soak: "5 min to reach the peak, then holds it. Finds what only shows up over time.",
+      smoke: "1 visit per second for 2 min: checks that the site and the scenario work before a real run.",
+      curve: "Your own curve: drag its points or type them in the table. Picking a shape again redraws the curve from that shape.",
+    };
+    function wordpressShape() {
+      const profile = $("wpProfile").value;
+      if (profile === "smoke") return [[0, 1], [120, 1]];
+      const peak = tenth(Number($("wpPeak").value));
+      if (!(peak > 0)) return null;
+      if (profile === "soak") {
+        const hold = parseDur($("wpSoakTime").value);
+        return hold >= 10 ? [[0, 0], [300, peak], [300 + hold, peak], [300 + hold + 120, 0]] : null;
+      }
+      const low = Math.max(0.1, tenth(peak / 5));
+      if (profile === "spike") return [[0, low], [180, low], [210, peak], [510, peak], [570, low], [870, low]];
+      const steps = Number($("wpSteps").value);
+      const hold = parseDur($("wpStepTime").value);
+      if (!Number.isInteger(steps) || steps < 1 || steps > 10 || !(hold >= 10)) return null;
+      const out = [[0, 0]];
+      let t = 0;
+      for (let i = 1; i <= steps; i++) {
+        const level = Math.max(0.1, tenth((peak * i) / steps));
+        out.push([t += 60, level], [t += hold, level]);
+      }
+      out.push([t + 60, 0]);
+      return out;
+    }
+    // Redraws the WordPress curve from the chosen shape. A field that does not make a shape leaves the
+    // curve as it was, and the summary says so.
+    function drawWordpressShape() {
+      const e = editors.wordpress;
+      if ($("wpProfile").value === "curve") { e.stale = false; return; }
+      const shape = wordpressShape();
+      e.stale = !shape;
+      if (!shape) return;
+      e.points = shape.map(([t, v]) => ({ t, v }));
+      e.active = -1;
+      fitAxes(e);
+    }
+    function renderWordpressFields() {
+      const profile = $("wpProfile").value;
+      $("wpProfileHint").textContent = PROFILE_HINTS[profile] || "";
+      document.querySelectorAll(".wp-steps").forEach((el) => { el.hidden = profile !== "steps"; });
+      document.querySelectorAll(".wp-soak").forEach((el) => { el.hidden = profile !== "soak"; });
+      document.querySelectorAll(".wp-peak").forEach((el) => { el.hidden = profile === "smoke" || profile === "curve"; });
+    }
+    ["wpProfile", "wpPeak", "wpSteps", "wpStepTime", "wpSoakTime"].forEach((id) =>
+      $(id).addEventListener("input", () => {
+        drawWordpressShape();
+        renderWordpressFields();
+        if (mode === "wordpress") renderCurve();
+      }));
+    // A point changed by hand: the WordPress curve is no longer the shape it was drawn from.
+    function edited() {
+      if (ed !== editors.wordpress || $("wpProfile").value === "curve") return;
+      ed.stale = false;
+      $("wpProfile").value = "curve";
+      renderWordpressFields();
     }
 
     // ---------- curve rendering ----------
@@ -443,10 +503,10 @@
     const G = { L: 46, R: 14, T: 14, B: 34, W: 640, H: 280 };
     const plotW = () => G.W - G.L - G.R;
     const plotH = () => G.H - G.T - G.B;
-    const xOf = (t) => G.L + (t / axisSeconds) * plotW();
-    const yOf = (v) => G.T + plotH() - (v / axisVus) * plotH();
-    const tOf = (x) => ((x - G.L) / plotW()) * axisSeconds;
-    const vOf = (y) => ((G.T + plotH() - y) / plotH()) * axisVus;
+    const xOf = (t) => G.L + (t / ed.axisSeconds) * plotW();
+    const yOf = (v) => G.T + plotH() - (v / ed.axisMax) * plotH();
+    const tOf = (x) => ((x - G.L) / plotW()) * ed.axisSeconds;
+    const vOf = (y) => ((G.T + plotH() - y) / plotH()) * ed.axisMax;
 
     function el(name, attrs = {}, text) {
       const n = document.createElementNS(SVGNS, name);
@@ -457,26 +517,29 @@
 
     function renderCurve() {
       const desc = svg.querySelector("desc");
+      desc.textContent = `${ed.unit.long} over time. The same points are editable in the Load profile table.`;
       svg.replaceChildren(desc);
       svg.classList.toggle("locked", !!running);
+      const { points, unit } = ed;
 
       // grid + ticks
-      // Five divisions: every axis height niceCeil picks (10, 20, 25, 50, 150...) splits into whole VUs.
+      // Five divisions: every axis height niceCeil picks (2, 2.5, 10, 25, 150...) splits into tenths
+      // or whole numbers.
       for (let i = 0; i <= 5; i++) {
-        const v = (axisVus / 5) * i, y = yOf(v);
+        const v = (ed.axisMax / 5) * i, y = yOf(v);
         svg.append(el("line", { x1: G.L, y1: y, x2: G.W - G.R, y2: y, class: i === 0 ? "axis" : "gridline" }));
-        svg.append(el("text", { x: G.L - 6, y: y + 3, class: "tick", "text-anchor": "end" }, String(Math.round(v))));
+        svg.append(el("text", { x: G.L - 6, y: y + 3, class: "tick", "text-anchor": "end" }, fmtV(tenth(v))));
       }
       // Time ticks on round marks (30s, 1m, 2m, 5m...), at most eight of them.
-      const tickStep = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find((s) => axisSeconds / s <= 8) || 3600;
-      for (let t = 0; t <= axisSeconds + 0.001; t += tickStep) {
+      const tickStep = [5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600].find((s) => ed.axisSeconds / s <= 8) || 3600;
+      for (let t = 0; t <= ed.axisSeconds + 0.001; t += tickStep) {
         const x = xOf(t);
         if (t > 0) svg.append(el("line", { x1: x, y1: G.T, x2: x, y2: G.T + plotH(), class: "gridline" }));
         svg.append(el("text", { x, y: G.H - G.B + 16, class: "tick", "text-anchor": "middle" }, fmtDur(t)));
       }
       svg.append(el("line", { x1: G.L, y1: G.T, x2: G.L, y2: G.T + plotH(), class: "axis" }));
       svg.append(el("text", { x: 12, y: G.T + plotH() / 2, class: "tick", "text-anchor": "middle",
-        transform: `rotate(-90 12 ${G.T + plotH() / 2})` }, "VUs"));
+        transform: `rotate(-90 12 ${G.T + plotH() / 2})` }, unit.name));
       svg.append(el("text", { x: G.L + plotW() / 2, y: G.H - 4, class: "tick", "text-anchor": "middle" }, "time"));
 
       // clickable background (adds a point)
@@ -485,39 +548,39 @@
       svg.append(bg);
 
       if (points.length) {
-        const coords = points.map((p) => `${xOf(p.t)},${yOf(p.vus)}`).join(" ");
+        const coords = points.map((p) => `${xOf(p.t)},${yOf(p.v)}`).join(" ");
         const base = yOf(0);
         svg.append(el("polygon", { points: `${xOf(points[0].t)},${base} ${coords} ${xOf(points[points.length - 1].t)},${base}`, class: "area" }));
         svg.append(el("polyline", { points: coords, class: "line" }));
       }
 
-      // progress marker while a curve run is going
-      if (running && runStartedAt && runCurveTotal) {
+      // progress marker while a run of this curve is going
+      if (running && runStartedAt && runCurveTotal && runMode === mode) {
         const elapsed = Math.min((Date.now() - runStartedAt) / 1000, runCurveTotal);
-        if (elapsed <= axisSeconds) {
+        if (elapsed <= ed.axisSeconds) {
           const x = xOf(elapsed);
           svg.append(el("line", { x1: x, y1: G.T, x2: x, y2: G.T + plotH(), class: "progress" }));
         }
       }
 
       points.forEach((p, i) => {
-        const c = el("circle", { cx: xOf(p.t), cy: yOf(p.vus), r: i === activeIndex ? 7 : 5.5,
-          class: "pt" + (i === activeIndex ? " active" : ""), tabindex: "0",
-          role: "slider", "aria-label": `Point ${i + 1}: ${p.vus} VUs at ${fmtDur(p.t)}`,
-          "aria-valuemin": "0", "aria-valuemax": String(limits.maxVus), "aria-valuenow": String(p.vus),
-          "aria-valuetext": `${p.vus} VUs at ${fmtDur(p.t)}` });
+        const c = el("circle", { cx: xOf(p.t), cy: yOf(p.v), r: i === ed.active ? 7 : 5.5,
+          class: "pt" + (i === ed.active ? " active" : ""), tabindex: "0",
+          role: "slider", "aria-label": `Point ${i + 1}: ${fmtV(p.v)} ${unit.name} at ${fmtDur(p.t)}`,
+          "aria-valuemin": "0", "aria-valuemax": String(unit.max()), "aria-valuenow": String(p.v),
+          "aria-valuetext": `${fmtV(p.v)} ${unit.name} at ${fmtDur(p.t)}` });
         c.addEventListener("pointerdown", (ev) => onPointDown(ev, i));
         c.addEventListener("keydown", (ev) => onPointKey(ev, i));
-        c.addEventListener("focus", () => { if (activeIndex !== i) { activeIndex = i; renderCurve(); svg.querySelectorAll(".pt")[i]?.focus(); } });
+        c.addEventListener("focus", () => { if (ed.active !== i) { ed.active = i; renderCurve(); svg.querySelectorAll(".pt")[i]?.focus(); } });
         svg.append(c);
       });
 
-      if (activeIndex >= 0 && points[activeIndex]) {
-        const p = points[activeIndex];
-        const label = `${fmtDur(p.t)} · ${p.vus} VUs`;
+      if (ed.active >= 0 && points[ed.active]) {
+        const p = points[ed.active];
+        const label = `${fmtDur(p.t)} · ${fmtV(p.v)} ${unit.name}`;
         const w = label.length * 6.2 + 14;
-        let x = xOf(p.t) - w / 2, y = yOf(p.vus) - 32;
-        x = clamp(x, G.L, G.W - G.R - w); if (y < 2) y = yOf(p.vus) + 12;
+        let x = xOf(p.t) - w / 2, y = yOf(p.v) - 32;
+        x = clamp(x, G.L, G.W - G.R - w); if (y < 2) y = yOf(p.v) + 12;
         svg.append(el("rect", { x, y, width: w, height: 20, rx: 5, class: "tip-bg" }));
         svg.append(el("text", { x: x + w / 2, y: y + 14, class: "tip", "text-anchor": "middle" }, label));
       }
@@ -536,20 +599,21 @@
 
     // Keeps a point inside the plot and strictly between its neighbours. The first point stays at t=0.
     function placePoint(i, t, v) {
+      const { points } = ed;
       const step = snapStep();
       let nt = i === 0 ? 0 : Math.round(t / step) * step;
       if (i > 0) {
         const lo = points[i - 1].t + 1;
         const hi = i < points.length - 1 ? points[i + 1].t - 1 : limits.maxDurationSeconds;
-        nt = clamp(nt, lo, Math.min(hi, axisSeconds));
+        nt = clamp(nt, lo, Math.min(hi, ed.axisSeconds));
       }
-      points[i] = { t: Math.round(nt), vus: clamp(Math.round(v), 0, limits.maxVus) };
+      points[i] = { t: Math.round(nt), v: snapV(ed, v) };
     }
 
     function onPointDown(ev, i) {
       if (running) return;
       ev.preventDefault();
-      activeIndex = i;
+      ed.active = i;
       drag = { i, moved: false };
       svg.setPointerCapture(ev.pointerId);
       // No redraw here. Replacing the circle under the cursor between the two presses of a
@@ -558,18 +622,20 @@
     }
 
     function onBackgroundDown(ev) {
+      const { points } = ed;
       if (running || points.length >= limits.maxPoints) return;
       const p = svgPoint(ev);
       const step = snapStep();
-      const t = Math.round(clamp(tOf(p.x), 0, axisSeconds) / step) * step;
+      const t = Math.round(clamp(tOf(p.x), 0, ed.axisSeconds) / step) * step;
       if (t <= 0 || points.some((q) => q.t === t)) return;
-      const v = clamp(Math.round(vOf(p.y)), 0, limits.maxVus);
+      const v = snapV(ed, vOf(p.y));
       let idx = points.findIndex((q) => q.t > t);
       if (idx === -1) idx = points.length;
-      points.splice(idx, 0, { t, vus: v });
-      activeIndex = idx;
+      points.splice(idx, 0, { t, v });
+      ed.active = idx;
       drag = { i: idx };
       svg.setPointerCapture(ev.pointerId);
+      edited();
       renderCurve();
     }
 
@@ -586,6 +652,7 @@
       drag = null;
       // A press without a move (the first half of a double-click) leaves the DOM alone.
       if (!moved) return;
+      edited();
       fitAxes();
       renderCurve();
     }
@@ -595,14 +662,16 @@
     // the first click is not the one that would get the second.
     svg.addEventListener("dblclick", (ev) => {
       const p = svgPoint(ev);
-      const hit = points.findIndex((q) => Math.hypot(xOf(q.t) - p.x, yOf(q.vus) - p.y) <= 10);
+      const hit = ed.points.findIndex((q) => Math.hypot(xOf(q.t) - p.x, yOf(q.v) - p.y) <= 10);
       if (hit > 0) removePoint(hit);
     });
 
     function removePoint(i) {
+      const { points } = ed;
       if (running || i === 0 || points.length <= 2) return;
       points.splice(i, 1);
-      activeIndex = Math.min(i, points.length - 1);
+      ed.active = Math.min(i, points.length - 1);
+      edited();
       fitAxes();
       renderCurve();
     }
@@ -610,19 +679,21 @@
     function onPointKey(ev, i) {
       if (running) return;
       const big = ev.shiftKey;
-      const p = points[i];
+      const p = ed.points[i];
+      const dv = ed.unit.step(ed) * (big ? 10 : 1);
       let handled = true;
-      if (ev.key === "ArrowUp") placePoint(i, p.t, p.vus + (big ? 10 : 1));
-      else if (ev.key === "ArrowDown") placePoint(i, p.t, p.vus - (big ? 10 : 1));
-      else if (ev.key === "ArrowRight") placePoint(i, p.t + snapStep() * (big ? 6 : 1), p.vus);
-      else if (ev.key === "ArrowLeft") placePoint(i, p.t - snapStep() * (big ? 6 : 1), p.vus);
+      if (ev.key === "ArrowUp") placePoint(i, p.t, p.v + dv);
+      else if (ev.key === "ArrowDown") placePoint(i, p.t, p.v - dv);
+      else if (ev.key === "ArrowRight") placePoint(i, p.t + snapStep() * (big ? 6 : 1), p.v);
+      else if (ev.key === "ArrowLeft") placePoint(i, p.t - snapStep() * (big ? 6 : 1), p.v);
       else if (ev.key === "Delete" || ev.key === "Backspace") { removePoint(i); handled = true; }
       else handled = false;
       if (!handled) return;
       ev.preventDefault();
+      edited();
       fitAxes();
       renderCurve();
-      svg.querySelectorAll(".pt")[Math.min(i, points.length - 1)]?.focus();
+      svg.querySelectorAll(".pt")[Math.min(i, ed.points.length - 1)]?.focus();
     }
 
     // ---------- table (mirrors the curve) ----------
@@ -631,6 +702,7 @@
       // Do not rebuild while someone is typing in the table: it would steal the caret.
       if (body.contains(document.activeElement)) { renderSummary(); return; }
       body.replaceChildren();
+      const { points, unit } = ed;
       points.forEach((p, i) => {
         const tr = document.createElement("tr");
         const num = document.createElement("td"); num.className = "num"; num.textContent = String(i + 1);
@@ -642,16 +714,16 @@
         atIn.addEventListener("change", () => editTime(i, atIn));
         at.append(atIn);
 
-        const vus = document.createElement("td"); vus.className = "vus";
+        const level = document.createElement("td"); level.className = "vus";
         const vIn = document.createElement("input");
-        vIn.type = "number"; vIn.min = "0"; vIn.max = String(limits.maxVus); vIn.value = String(p.vus);
+        vIn.type = "number"; vIn.min = "0"; vIn.max = String(unit.max()); vIn.step = unit.inputStep; vIn.value = String(p.v);
         vIn.disabled = !!running;
-        vIn.setAttribute("aria-label", `Point ${i + 1} VUs`);
-        vIn.addEventListener("change", () => editVus(i, vIn));
-        vus.append(vIn);
+        vIn.setAttribute("aria-label", `Point ${i + 1} ${unit.name}`);
+        vIn.addEventListener("change", () => editLevel(i, vIn));
+        level.append(vIn);
 
         const over = document.createElement("td"); over.className = "over";
-        over.textContent = i === 0 ? "start" : `→ ${p.vus} in ${fmtDur(p.t - points[i - 1].t)}`;
+        over.textContent = i === 0 ? "start" : `→ ${fmtV(p.v)} in ${fmtDur(p.t - points[i - 1].t)}`;
 
         const del = document.createElement("td");
         const b = document.createElement("button");
@@ -661,13 +733,14 @@
         b.addEventListener("click", () => removePoint(i));
         del.append(b);
 
-        tr.append(num, at, vus, over, del);
+        tr.append(num, at, level, over, del);
         body.append(tr);
       });
       renderSummary();
     }
 
     function editTime(i, input) {
+      const { points } = ed;
       const t = parseDur(input.value);
       const prev = points[i - 1].t, next = i < points.length - 1 ? points[i + 1].t : Infinity;
       const ok = Number.isFinite(t) && t > prev && t < next && t <= limits.maxDurationSeconds;
@@ -679,34 +752,66 @@
       showErrors([]);
       points[i].t = Math.round(t);
       input.blur();
+      edited();
       fitAxes(); renderCurve();
     }
 
-    function editVus(i, input) {
+    function editLevel(i, input) {
       const v = Number(input.value);
-      const ok = Number.isInteger(v) && v >= 0 && v <= limits.maxVus;
+      const whole = ed === editors.curve;
+      const max = ed.unit.max();
+      const ok = Number.isFinite(v) && (!whole || Number.isInteger(v)) && v >= 0 && v <= max;
       input.setAttribute("aria-invalid", ok ? "false" : "true");
-      if (!ok) { showErrors([`Point ${i + 1}: VUs must be a whole number from 0 to ${limits.maxVus}.`]); return; }
+      if (!ok) {
+        showErrors([whole
+          ? `Point ${i + 1}: VUs must be a whole number from 0 to ${max}.`
+          : `Point ${i + 1}: visits per second must be a number from 0 to ${max}.`]);
+        return;
+      }
       showErrors([]);
-      points[i].vus = v;
+      ed.points[i].v = whole ? v : tenth(v);
       input.blur();
+      edited();
       fitAxes(); renderCurve();
     }
 
     function renderSummary() {
+      const { points, unit } = ed;
       const total = points.length ? points[points.length - 1].t : 0;
-      const peak = points.length ? Math.max(...points.map((p) => p.vus)) : 0;
+      const peak = points.length ? Math.max(...points.map((p) => p.v)) : 0;
       const box = $("curveSummary");
-      box.textContent = `Total ${fmtDur(total)} · peak ${peak} VUs (max ${limits.maxVus}) · ${points.length}/${limits.maxPoints} points`;
+      box.replaceChildren();
+      const length = document.createElement("span");
+      length.textContent = `Total ${fmtDur(total)}`;
+      if (total > limits.maxDurationSeconds) {
+        length.textContent += ` (over this panel's ${Math.round(limits.maxDurationSeconds / 60)} min)`;
+        length.style.color = "var(--stop)";
+      }
+      const level = document.createElement("span");
+      level.textContent = `peak ${fmtV(peak)} ${unit.name} (max ${unit.max()})`;
+      // A visit reads 2.6 pages on average, and the pages are what reach the site.
+      if (ed === editors.wordpress && peak > 0) level.textContent += ` · about ${fmtV(tenth(peak * 2.6))} pages/s`;
+      if (peak > unit.max()) level.style.color = "var(--stop)";
+      const count = document.createElement("span");
+      count.textContent = `${points.length}/${limits.maxPoints} points`;
+      box.append(length, level, count);
+      if (ed.stale) {
+        const stale = document.createElement("span");
+        stale.style.color = "var(--stop)";
+        stale.textContent = "The curve was not redrawn: check the shape's fields above.";
+        box.append(stale);
+      }
     }
 
     $("addPoint").addEventListener("click", () => {
+      const { points } = ed;
       if (running || points.length >= limits.maxPoints) return;
       const last = points[points.length - 1];
       const t = Math.min(last.t + 30, limits.maxDurationSeconds);
       if (t <= last.t) { showErrors([`The curve already reaches the ${fmtDur(limits.maxDurationSeconds)} limit.`]); return; }
-      points.push({ t, vus: last.vus });
-      activeIndex = points.length - 1;
+      points.push({ t, v: last.v });
+      ed.active = points.length - 1;
+      edited();
       fitAxes(); renderCurve();
     });
     document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => { if (!running) preset(b.dataset.preset); }));
@@ -745,7 +850,7 @@
       $("addPoint").disabled = isRunning;
       document.querySelectorAll("[data-preset]").forEach((b) => { b.disabled = isRunning; });
       renderDashboard(isRunning);
-      if (mode === "curve") renderCurve();
+      if (editors[mode]) renderCurve();
     }
 
     function showSuggestions(list) {
@@ -809,9 +914,12 @@
           $("vus").max = limits.maxVus;
           $("vusHint").textContent = `Up to ${limits.maxVus} on this panel.`;
           $("durHint").textContent = `e.g. 30s, 5m, 1h (max ${Math.round(limits.maxDurationSeconds / 60)} min)`;
-          const tooBig = points.some((p) => p.vus > limits.maxVus || p.t > limits.maxDurationSeconds);
-          if (!points.length || tooBig) preset("ramp");
-          else { fitAxes(); if (mode === "curve") renderCurve(); }
+          const curve = editors.curve;
+          const tooBig = curve.points.some((p) => p.v > limits.maxVus || p.t > limits.maxDurationSeconds);
+          if (!curve.points.length || tooBig) preset("ramp");
+          else fitAxes(curve);
+          fitAxes(editors.wordpress);
+          if (editors[mode]) renderCurve();
         }
         els.meta.replaceChildren();
         if (s.platform) els.meta.append(`Docker platform: ${s.platform}. `);
@@ -843,7 +951,7 @@
           const failed = s.health && s.health.failRate >= 0.5;
           els.status.textContent = failed ? "Last run failed" : (s.lastRun.exitCode === 0 ? "Idle (last run ok)" : `Idle (last run exit ${s.lastRun.exitCode})`);
         }
-        if (s.running && mode === "curve" && runStartedAt && !drag) renderCurve();
+        if (s.running && mode === runMode && runStartedAt && !drag) renderCurve();
       } catch (e) {
         els.status.textContent = e.status === 401 ? "Token required" : "Unreachable";
       }
@@ -858,16 +966,16 @@
       const targetUrl = $("targetUrl").value;
       const method = /\/loadtest(\b|\?|$)/.test(targetUrl) ? "POST" : $("method").value;
       const common = { targetUrl, method, body: $("body").value };
+      // WordPress sends its curve, whatever shape it was drawn from: what is drawn is what runs.
       const payload = mode === "wordpress"
         ? {
-            scenario: "wordpress", targetUrl,
-            profile: $("wpProfile").value, peak: Number($("wpPeak").value),
-            steps: Number($("wpSteps").value), stepTime: $("wpStepTime").value, soakTime: $("wpSoakTime").value,
+            scenario: "wordpress", targetUrl, profile: "curve",
+            points: editors.wordpress.points.map((p) => ({ t: p.t, rate: p.v })),
             thinkMin: Number($("wpThinkMin").value), thinkMax: Number($("wpThinkMax").value),
             fetchAssets: $("wpAssets").checked,
           }
         : mode === "curve"
-        ? { ...common, mode: "curve", points: points.map((p) => ({ t: p.t, vus: p.vus })) }
+        ? { ...common, mode: "curve", points: editors.curve.points.map((p) => ({ t: p.t, vus: p.v })) }
         : { ...common, mode: "constant", vus: Number($("vus").value), duration: $("duration").value, rps: $("rps").value };
       try {
         const { ok, data } = await api("/api/start", {
@@ -876,7 +984,7 @@
         if (!ok) { showErrors(data.errors || [data.error || "Unknown error"]); els.start.disabled = false; return; }
         $("healthAlert").hidden = true;
         els.logs.textContent = "Starting k6…";
-        if (mode === "curve") { runStartedAt = Date.now(); runCurveTotal = data.config?.totalSeconds || 0; }
+        if (editors[mode]) { runMode = mode; runStartedAt = Date.now(); runCurveTotal = data.config?.totalSeconds || 0; }
         setRunning(true);
         // Check in early instead of waiting out the 3s poll: a wrong target fails from the first
         // request, and the point is to say so in seconds, not at the end of the run.
@@ -911,6 +1019,7 @@
     $("method").addEventListener("change", () => { if (/\/loadtest(\b|\?|$)/.test($("targetUrl").value) && $("method").value === "POST") $("methodNote").hidden = false; });
 
     preset("ramp");
+    drawWordpressShape();
     applyMode();
     syncMethodToTarget();
     refresh();

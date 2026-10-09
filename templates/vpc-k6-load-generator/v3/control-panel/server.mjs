@@ -18,7 +18,9 @@
 // SCENARIOS (v3)
 // Constant and Curve run the single-URL test, exactly as in v2. WordPress runs
 // /opt/k6/scripts/wordpress.js: visitors browsing the site, with the load set in new visits per
-// second. It is offered only when the bootstrap managed to download that script.
+// second. It is offered only when the bootstrap managed to download that script. Its load is a
+// curve too: the page draws the chosen shape as points, the person may move them, and the points
+// are what is sent (profile "curve"), so what is drawn is what runs.
 //
 // SECURITY
 // This template is a short-lived teaching lab, so the panel is meant to be reachable from anywhere
@@ -173,7 +175,8 @@ function validate(input) {
 
 // WordPress scenario. The load is new visits per second, shaped by a profile; the total length
 // is computed the way wordpress.js lays out its stages, so the duration cap applies to it too.
-const PROFILES = new Set(["smoke", "steps", "spike", "soak"]);
+// "curve" is a list of points drawn in the page, checked like the Curve mode's.
+const PROFILES = new Set(["smoke", "steps", "spike", "soak", "curve"]);
 
 function wordpressSeconds({ profile, steps, stepSeconds, soakSeconds }) {
   if (profile === "smoke") return 120;
@@ -184,7 +187,18 @@ function wordpressSeconds({ profile, steps, stepSeconds, soakSeconds }) {
 
 function validateWordpress(input, errors) {
   const profile = String(input.profile ?? "steps");
-  if (!PROFILES.has(profile)) errors.push("Load shape must be smoke, steps, spike or soak.");
+  if (!PROFILES.has(profile)) errors.push("Load shape must be smoke, steps, spike, soak or curve.");
+
+  const thinkMin = Number(input.thinkMin ?? 3);
+  const thinkMax = Number(input.thinkMax ?? 10);
+  if (!Number.isFinite(thinkMin) || !Number.isFinite(thinkMax) || thinkMin < 0 || thinkMax > 120 || thinkMin > thinkMax)
+    errors.push("Reading time must go from a minimum to a maximum between 0 and 120 seconds.");
+
+  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true };
+  if (profile === "curve") {
+    const curve = validatePoints(input.points, errors, RATE_LEVEL);
+    return { ...common, points: curve.points, stages: curve.stages, startRate: curve.start, peak: curve.peak, totalSeconds: curve.totalSeconds };
+  }
 
   const peak = Number(input.peak);
   if (profile !== "smoke" && (!Number.isInteger(peak) || peak < 1 || peak > MAX_RATE))
@@ -201,46 +215,39 @@ function validateWordpress(input, errors) {
   const soakSeconds = durationSeconds(soakTime);
   if (profile === "soak" && (!Number.isFinite(soakSeconds) || soakSeconds < 10)) errors.push("Time at the peak must look like 30m or 1h, and be at least 10s.");
 
-  const thinkMin = Number(input.thinkMin ?? 3);
-  const thinkMax = Number(input.thinkMax ?? 10);
-  if (!Number.isFinite(thinkMin) || !Number.isFinite(thinkMax) || thinkMin < 0 || thinkMax > 120 || thinkMin > thinkMax)
-    errors.push("Reading time must go from a minimum to a maximum between 0 and 120 seconds.");
-
   const totalSeconds = wordpressSeconds({ profile, steps, stepSeconds, soakSeconds });
   if (Number.isFinite(totalSeconds) && totalSeconds > MAX_DURATION_S)
     errors.push(`This run would take ${Math.ceil(totalSeconds / 60)} min; the panel allows ${Math.floor(MAX_DURATION_S / 60)} min (K6_PANEL_MAX_DURATION).`);
 
-  return {
-    scenario: "wordpress",
-    profile,
-    peak,
-    steps,
-    stepTime,
-    soakTime,
-    thinkMin,
-    thinkMax,
-    fetchAssets: input.fetchAssets === true,
-    totalSeconds,
-  };
+  return { ...common, peak, steps, stepTime, soakTime, totalSeconds };
 }
 
-// Curve mode. The editor sends points in ABSOLUTE time -- {t: seconds since start, vus} -- which
-// is what a person draws. k6's ramping-vus wants the opposite shape: a start level and a list of
-// stages, each "reach this target over this long". The conversion happens here, after validation,
-// so the browser can never hand k6 a stage list the panel did not check.
+// Curves. The editor sends points in ABSOLUTE time -- {t: seconds since start, <level>} -- which
+// is what a person draws. k6 wants the opposite shape: a start level and a list of stages, each
+// "reach this target over this long". The conversion happens here, after validation, so the
+// browser can never hand k6 a stage list the panel did not check.
+//   Curve mode: the level is VUs, a whole number (k6's ramping-vus).
+//   WordPress:  the level is new visits per second, and may have decimals (wordpress.js runs it
+//               per minute, since k6 counts arrivals in whole numbers per time unit).
 const MAX_POINTS = 50;
+const VU_LEVEL = { key: "vus", whole: true, max: MAX_VUS, unit: "VUs",
+  rule: `VUs must be a whole number from 0 to ${MAX_VUS}` };
+const RATE_LEVEL = { key: "rate", whole: false, max: MAX_RATE, unit: "new visits per second",
+  rule: `new visits per second must be a number from 0 to ${MAX_RATE}` };
 
-function validateCurve(raw, errors) {
+function validatePoints(raw, errors, level) {
   if (!Array.isArray(raw) || raw.length < 2) {
     errors.push("A curve needs at least two points.");
-    return { points: [], stages: [], startVus: 0, totalSeconds: 0, peakVus: 0 };
+    return { points: [], stages: [], start: 0, totalSeconds: 0, peak: 0 };
   }
   if (raw.length > MAX_POINTS) errors.push(`A curve is limited to ${MAX_POINTS} points.`);
 
-  const points = raw.map((p) => ({ t: Number(p?.t), vus: Number(p?.vus) }));
+  const points = raw.map((p) => ({ t: Number(p?.t), [level.key]: Number(p?.[level.key]) }));
   points.forEach((p, i) => {
+    const v = p[level.key];
     if (!Number.isInteger(p.t) || p.t < 0) errors.push(`Point ${i + 1}: time must be a whole number of seconds.`);
-    if (!Number.isInteger(p.vus) || p.vus < 0 || p.vus > MAX_VUS) errors.push(`Point ${i + 1}: VUs must be a whole number from 0 to ${MAX_VUS}.`);
+    if (!Number.isFinite(v) || (level.whole && !Number.isInteger(v)) || v < 0 || v > level.max)
+      errors.push(`Point ${i + 1}: ${level.rule}.`);
   });
   if (points[0].t !== 0) errors.push("The first point must be at time 0.");
   for (let i = 1; i < points.length; i++) {
@@ -252,11 +259,16 @@ function validateCurve(raw, errors) {
 
   const totalSeconds = points[points.length - 1].t;
   if (totalSeconds > MAX_DURATION_S) errors.push(`The curve is capped at ${MAX_DURATION_S} seconds on this panel.`);
-  const peakVus = Math.max(...points.map((p) => p.vus));
-  if (peakVus < 1) errors.push("The curve never goes above 0 VUs, so nothing would run.");
+  const peak = Math.max(...points.map((p) => p[level.key]));
+  if (!(peak > 0)) errors.push(`The curve never goes above 0 ${level.unit}, so nothing would run.`);
 
-  const stages = points.slice(1).map((p, i) => ({ target: p.vus, duration: `${p.t - points[i].t}s` }));
-  return { points, stages, startVus: points[0].vus, totalSeconds, peakVus };
+  const stages = points.slice(1).map((p, i) => ({ target: p[level.key], duration: `${p.t - points[i].t}s` }));
+  return { points, stages, start: points[0][level.key], totalSeconds, peak };
+}
+
+function validateCurve(raw, errors) {
+  const curve = validatePoints(raw, errors, VU_LEVEL);
+  return { points: curve.points, stages: curve.stages, startVus: curve.start, totalSeconds: curve.totalSeconds, peakVus: curve.peak };
 }
 
 // --- k6 lifecycle -------------------------------------------------------------------------------
@@ -348,12 +360,18 @@ async function start(cfg) {
   args.push("-p", `${DASHBOARD_PORT}:${DASHBOARD_PORT}`, "-e", `TARGET_URL=${cfg.targetUrl}`);
   const script = cfg.scenario === "wordpress" ? WORDPRESS_SCRIPT : SCRIPT_PATH;
   if (cfg.scenario === "wordpress") {
+    args.push("-e", `PROFILE=${cfg.profile}`);
+    if (cfg.profile === "curve") {
+      args.push("-e", `STAGES=${JSON.stringify(cfg.stages)}`, "-e", `START_RATE=${cfg.startRate}`);
+    } else {
+      args.push(
+        "-e", `PEAK=${cfg.peak}`,
+        "-e", `STEPS=${cfg.steps}`,
+        "-e", `STEP_TIME=${cfg.stepTime}`,
+        "-e", `SOAK_TIME=${cfg.soakTime}`,
+      );
+    }
     args.push(
-      "-e", `PROFILE=${cfg.profile}`,
-      "-e", `PEAK=${cfg.peak}`,
-      "-e", `STEPS=${cfg.steps}`,
-      "-e", `STEP_TIME=${cfg.stepTime}`,
-      "-e", `SOAK_TIME=${cfg.soakTime}`,
       "-e", `THINK_MIN=${cfg.thinkMin}`,
       "-e", `THINK_MAX=${cfg.thinkMax}`,
       "-e", `MAX_VUS=${MAX_VUS}`,

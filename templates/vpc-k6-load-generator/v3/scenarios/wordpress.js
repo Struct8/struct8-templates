@@ -17,6 +17,8 @@
 //   K6_SCENARIO=wordpress PROFILE=steps PEAK=20 TARGET_URL=https://wp.example.com/ /opt/k6/run.sh
 // Anywhere else:
 //   TARGET_URL=https://wp.example.com/ PROFILE=steps PEAK=20 k6 run wordpress.js
+// A curve of your own (what the panel sends; STAGES in new visits per second):
+//   PROFILE=curve START_RATE=0.5 STAGES='[{"target":2,"duration":"5m"}]' k6 run wordpress.js
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
@@ -24,7 +26,7 @@ import { parseHTML } from 'k6/html';
 import { Counter } from 'k6/metrics';
 
 const BASE = (__ENV.TARGET_URL || '').replace(/\/+$/, '');
-const PROFILE = __ENV.PROFILE || 'steps'; // smoke | steps | soak | spike
+const PROFILE = __ENV.PROFILE || 'steps'; // smoke | steps | soak | spike | curve
 const PEAK = Number(__ENV.PEAK || 10); // new visits per second at the top of the curve
 const STEPS = Number(__ENV.STEPS || 5); // steps profile: how many levels up to PEAK
 const STEP_TIME = __ENV.STEP_TIME || '10m'; // time held at each level
@@ -78,18 +80,33 @@ function stages() {
   return out;
 }
 
+// curve profile: a shape drawn in the panel, as a k6 stage list. STAGES and
+// START_RATE are in new visits per second and may have decimals (0.5 is one
+// visit every two seconds). k6 takes only whole numbers of arrivals per time
+// unit, so a curve is run per minute: 0.5 visits/s becomes 30 a minute.
+function rate() {
+  if (PROFILE !== 'curve') return { startRate: 1, timeUnit: '1s', stages: stages() };
+  const curve = JSON.parse(__ENV.STAGES || '[]');
+  if (!Array.isArray(curve) || curve.length === 0)
+    throw new Error('PROFILE=curve needs STAGES, e.g. STAGES=\'[{"target":2,"duration":"5m"}]\'');
+  const perMinute = (perSecond) => Math.round(Number(perSecond) * 60);
+  return {
+    startRate: perMinute(__ENV.START_RATE || 0),
+    timeUnit: '1m',
+    stages: curve.map((s) => ({ target: perMinute(s.target), duration: s.duration }))
+  };
+}
+
 export const options = {
   scenarios: {
     visitors: {
       executor: 'ramping-arrival-rate',
-      startRate: 1,
-      timeUnit: '1s',
+      ...rate(),
       preAllocatedVUs: Math.min(50, MAX_VUS),
       maxVUs: MAX_VUS,
       // A visit can last about a minute (up to six pages and five pauses), and the
       // default 30s would cut the last ones short.
-      gracefulStop: '1m',
-      stages: stages()
+      gracefulStop: '1m'
     }
   },
   discardResponseBodies: true, // saves memory; requests that need the body ask for it

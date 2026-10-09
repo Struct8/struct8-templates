@@ -180,10 +180,11 @@ climbing when the site slows down, which is what shows where it breaks.
 | Variable | Default | Meaning |
 |---|---|---|
 | `TARGET_URL` | none (required) | The site, e.g. `https://wp.example.com/` |
-| `PROFILE` | `steps` | `smoke` (1 visit/s for 2 min), `steps` (climbs to the peak in levels), `spike` (sudden jump), `soak` (holds the peak) |
+| `PROFILE` | `steps` | `smoke` (1 visit/s for 2 min), `steps` (climbs to the peak in levels), `spike` (sudden jump), `soak` (holds the peak), `curve` (the stages in `STAGES`) |
 | `PEAK` | `10` | New visits per second at the top of the curve |
 | `STEPS` / `STEP_TIME` | `5` / `10m` | `steps` profile: how many levels, and how long each is held. A new ECS task or EC2 instance takes minutes to join |
 | `SOAK_TIME` | `1h` | `soak` profile: how long the peak is held |
+| `STAGES` / `START_RATE` | none / `0` | `curve` profile: a k6 stage list, e.g. `[{"target":2,"duration":"5m"}]`, and the rate at the start, both in new visits per second. Decimals are allowed: `0.5` is one visit every two seconds. The panel sends these. `/opt/k6/run.sh` does not pass them to k6: it is written by the bootstrap, so adding them would change the `user_data` of every v3 generator |
 | `THINK_MIN` / `THINK_MAX` | `3` / `10` | Seconds a visitor reads each page |
 | `MAX_VUS` | `1000` | Concurrent visits k6 may keep open. Runs out on a very slow site: `dropped_iterations` then counts the visits it could not start |
 | `FETCH_ASSETS` | `off` | `on` downloads the images, CSS and JS of each page once per visit. Behind a CDN they come from its cache and never reach WordPress |
@@ -196,9 +197,25 @@ K6_SCENARIO=wordpress PROFILE=steps PEAK=20 TARGET_URL=https://wp.example.com/ /
 ### In the panel
 
 A third mode, **WordPress**, appears when the bootstrap managed to download the
-scenario. It shows the load shape, the peak and the times, and the total length
-of the run before it starts. `K6_PANEL_MAX_RATE` (default `100`) caps the peak in
-new visits per second, next to the other caps.
+scenario. `K6_PANEL_MAX_RATE` (default `100`) caps the rate in new visits per
+second, next to the other caps.
+
+The load is a curve of new visits per second over time, edited like the Curve
+mode's: click to add a point, drag it, or type it in the table.
+
+- **The four shapes draw the curve.** Steps, Spike, Soak and Smoke test take their
+  fields (peak, steps, times) and draw the points. Changing a field redraws it.
+- **Moving a point turns the shape into Custom.** The fields of the shape are
+  hidden, and picking a shape again redraws the curve from that shape.
+- **What is drawn is what runs.** The page always sends the points
+  (`PROFILE=curve`), never the shape's name. The panel's shapes start at 0 instead
+  of 1 visit/s, and their levels keep one decimal, so a peak of 2 in four steps
+  climbs 0.5, 1, 1.5, 2.
+- **Fractions of a visit.** The curve takes one decimal (0.5 is one visit every two
+  seconds). k6 counts arrivals in whole numbers per time unit, so `wordpress.js`
+  runs a curve per minute: 0.5 visits/s is 30 a minute.
+- The summary under the table gives the total length, the peak, and the pages per
+  second at the peak (a visit reads 2.6 pages on average).
 
 Two fixes over v2, in every mode:
 
