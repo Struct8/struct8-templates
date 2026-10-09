@@ -51,3 +51,19 @@ Reads at runtime:
   topic ARN is built from the region, the function's account and this name.
 
 Needs, from the connection to the topic: `sns:Publish` on it.
+
+### X-Ray
+
+The diagram has an X-Ray group connected to the producer, the three consumers
+and the orders topic, and it turns on active tracing in each of them. The
+connection from each function to the group grants `xray:PutTraceSegments`; the
+one from the group to the topic writes the X-Ray resource policy that lets SNS
+send its segments.
+
+Active tracing records a Lambda invocation and nothing inside it, so the
+producer wraps its SNS client with `traceCalls`, from `xray.mjs` in its folder
+(the same file as in `stepfunctions-order-lab` and `bedrock-agent-lab`). Each
+`Publish` and `PublishBatch` becomes a subsegment of the invocation, sent to the
+X-Ray daemon that runs beside the function, with no layer and no dependency. It
+is named after the topic, the id at the end of the topic's ARN, which is what
+the Struct8 canvas matches to the topic's node.
