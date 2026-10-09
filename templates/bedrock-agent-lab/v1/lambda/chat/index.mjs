@@ -17,9 +17,15 @@
 // and sometimes put the answer between <response> tags; the reasoning and the
 // tags are removed before the guardrail and the caller see the answer.
 //
-// Reads at runtime:
-//   HARNESS_ARN                     - set by the diagram from the harness.
-//   GUARDRAIL_ID, GUARDRAIL_VERSION - set by the diagram from the guardrail.
+// Reads at runtime the variables the diagram generates from the function's
+// connections, one set per connection. The name is <type at the other end>_
+// <value>_<label of the connection>, and 0 when the connection has no label:
+//   AWS_BEDROCKAGENTCORE_HARNESS_ARN_0           - the harness it asks.
+//   AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0,
+//   AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0    - the guardrail, optional.
+// None of them carries a node's name, so renaming a node or copying the template
+// changes no name here. The same connections grant the function its
+// permissions.
 
 import { BedrockAgentCoreClient, InvokeHarnessCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
@@ -27,7 +33,10 @@ import { createHash, randomUUID } from 'node:crypto';
 
 const agentcore = new BedrockAgentCoreClient({});
 const bedrock = new BedrockRuntimeClient({});
-const { HARNESS_ARN, GUARDRAIL_ID, GUARDRAIL_VERSION } = process.env;
+const env = process.env;
+const HARNESS_ARN = env.AWS_BEDROCKAGENTCORE_HARNESS_ARN_0;
+const GUARDRAIL_ID = env.AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0;
+const GUARDRAIL_VERSION = env.AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0;
 
 // InvokeHarness refuses a runtime session id shorter than this.
 const MIN_SESSION_ID_LENGTH = 33;
@@ -115,7 +124,10 @@ function readBody(event) {
 
 // NONE, ANONYMIZED or BLOCKED, and the text to use from here on: the guardrail's
 // output when it intervened (the masked text, or its blocked message).
+// NOT_CONNECTED, with the text as it came, when the function has no connection
+// to a guardrail in the diagram.
 async function guard(source, text) {
+  if (!GUARDRAIL_ID) return { action: 'NOT_CONNECTED', text };
   const result = await bedrock.send(
     new ApplyGuardrailCommand({
       guardrailIdentifier: GUARDRAIL_ID,
@@ -197,6 +209,13 @@ async function ask({ question, sessionId, actorId }) {
     return json(400, { error: 'actorId has letters, digits, - and _ only, at most 64 characters.' });
   }
   const actor = givenActor || sessionActor(session);
+
+  // A connection missing from the diagram leaves its variable unset. The answer
+  // names the connection, instead of the call failing in AWS with a validation
+  // error about an empty ARN.
+  if (!HARNESS_ARN) {
+    return json(500, { error: 'The function is not connected to the AgentCore harness in the diagram.' });
+  }
 
   try {
     const input = await guard('INPUT', text);

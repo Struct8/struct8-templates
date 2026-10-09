@@ -40,9 +40,19 @@ past 12 months since 2026-07-30, which is why this template does not use it.
   `default`, shared by every caller. The page gives each browser an actor id
   of its own and keeps it in the browser.
 
-  Reads at runtime:
-  - `HARNESS_ARN` — set by the diagram from the harness.
-  - `GUARDRAIL_ID`, `GUARDRAIL_VERSION` — set by the diagram from the guardrail.
+  Reads at runtime the variables the diagram generates from the function's
+  connections. Each name is the type at the other end, the value and the
+  connection's label (`0` without one), so renaming a node or copying the
+  template changes none of them. The same connections grant the permissions.
+  - `AWS_BEDROCKAGENTCORE_HARNESS_ARN_0` — the harness it asks
+    (`InvokeHarness`).
+  - `AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0`, `AWS_BEDROCK_GUARDRAIL_GUARDRAIL_VERSION_0`
+    — the guardrail (`ApplyGuardrail`). Optional: without that connection the
+    question and the answer are not filtered, and the page says
+    `NOT_CONNECTED` for the guardrail.
+
+  A missing connection to the harness is named in the answer (`The function is
+  not connected to the AgentCore harness in the diagram.`).
 
 Dependencies (`@aws-sdk/client-dynamodb`, `@aws-sdk/client-bedrock-agentcore`,
 `@aws-sdk/client-bedrock-runtime`) are the ones bundled in the `nodejs22.x`
