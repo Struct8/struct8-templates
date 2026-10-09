@@ -21,6 +21,9 @@
 // Logs every request with its status and duration, and each publish with the
 // message ids and what each message asked for.
 //
+// Each call to the topic is recorded in X-Ray as a subsegment of the
+// invocation, named after the topic: see xray.mjs.
+//
 // Reads at runtime:
 //   AWS_SNS_TOPIC_NAME_*  - set by the diagram from the connection to the topic.
 //                           The topic ARN is built from the region, the
@@ -31,8 +34,11 @@ import { PublishBatchCommand, PublishCommand, SNSClient } from '@aws-sdk/client-
 import { Console } from 'node:console';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { traceCalls } from './xray.mjs';
 
-const sns = new SNSClient({});
+// Named after the topic, the id at the end of its ARN, which the Struct8 canvas
+// matches to the node the status stamped with that ARN.
+const sns = traceCalls(new SNSClient({}), () => TOPIC);
 const REGION = process.env.AWS_REGION;
 const PAGE = readFileSync(new URL('./page.html', import.meta.url), 'utf8');
 
