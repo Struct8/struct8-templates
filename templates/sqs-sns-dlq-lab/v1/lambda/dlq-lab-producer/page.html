@@ -75,7 +75,7 @@
       <li>What each consumer did: its log, from the Lambda console.</li>
     </ul>
     <p class="muted">A message stays in a dead-letter queue until it is deleted. The alarm stays in ALARM while the Track 1 dead-letter queue holds any message.</p>
-    <p class="muted">Track 4 publishes a message that succeeds every minute, so each consumer also runs once a minute with no click here.</p>
+    <p class="muted">A schedule publishes a message that succeeds every minute, so each consumer also runs once a minute with no click here.</p>
   </section>
 
   <section style="grid-column: 1 / -1">
@@ -86,9 +86,7 @@
         <tbody>
           <tr><td>1 — queue redrive</td><td>topic → queue → event source mapping → function</td><td>The queue delivers it again when its 60-second visibility timeout ends, 3 receives in all.</td><td>The dead-letter queue of the queue, watched by an alarm.</td></tr>
           <tr><td>2a — on-failure destination</td><td>topic → function, invoked asynchronously</td><td>None: the asynchronous invocation settings allow 0 retries.</td><td>The on-failure destination queue, as a record with the request and the error.</td></tr>
-          <tr><td>2b — Lambda dead-letter queue</td><td>topic → function, invoked asynchronously</td><td>2, the Lambda default, minutes apart.</td><td>The dead-letter queue of the function, with the error in the message attributes.</td></tr>
-          <tr><td>4 — schedule delivery</td><td>schedule → topic, every minute</td><td>None.</td><td>Its dead-letter queue receives only what the schedule could not deliver to the topic. Nothing sent from this page reaches it.</td></tr>
-        </tbody>
+          <tr><td>2b — Lambda dead-letter queue</td><td>topic → function, invoked asynchronously</td><td>2, the Lambda default, minutes apart.</td><td>The dead-letter queue of the function, with the error in the message attributes.</td></tr>        </tbody>
       </table>
     </div>
   </section>

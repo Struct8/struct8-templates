@@ -24,7 +24,9 @@ one retries and keeps its failed messages in its own way:
 | 1 — queue redrive | topic → queue → event source mapping → function | the dead-letter queue of the queue, after the receives its redrive policy allows |
 | 2a — on-failure destination | topic → function, invoked asynchronously | the on-failure destination of the asynchronous invocation settings |
 | 2b — Lambda dead-letter queue | topic → function, invoked asynchronously | the dead-letter queue of the function |
-| 4 — schedule delivery | schedule → topic, a message that succeeds every minute | the schedule's dead-letter queue, only when it cannot deliver to the topic |
+
+A schedule also publishes a message that succeeds to the topic every minute,
+so each consumer runs once a minute with no request to the producer.
 
 ### The function
 
