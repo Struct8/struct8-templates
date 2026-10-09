@@ -54,8 +54,29 @@ past 12 months since 2026-07-30, which is why this template does not use it.
   A missing connection to the harness is named in the answer (`The function is
   not connected to the AgentCore harness in the diagram.`).
 
+### X-Ray
+
+Both functions are connected to an X-Ray group in the diagram, which turns on
+active tracing and grants `xray:PutTraceSegments`. Active tracing records an
+invocation and nothing inside it, so each function also wraps its SDK clients
+with `traceCalls`, from `xray.mjs` in its folder (the same file as in
+`stepfunctions-order-lab`). Each call becomes a subsegment of the invocation,
+sent to the X-Ray daemon that runs beside the function, with no layer and no
+dependency. The subsegment is named after the id at the end of the resource's
+ARN, which is what the Struct8 canvas matches to the node:
+
+- `chat` → the guardrail (its id) for each `ApplyGuardrail`, and the harness
+  (`<name>-<suffix>`) for `InvokeHarness`. The harness answers in a stream,
+  and its subsegment lasts until the stream ends, not until the first bytes.
+- `orders-tool` → the orders table (its name) for `GetItem`.
+
+What happens inside the harness (the model, the gateway, the memory) is not in
+these traces: AgentCore sends its own spans only with CloudWatch Transaction
+Search on in the account.
+
 Dependencies (`@aws-sdk/client-dynamodb`, `@aws-sdk/client-bedrock-agentcore`,
 `@aws-sdk/client-bedrock-runtime`) are the ones bundled in the `nodejs22.x`
 managed runtime; nothing is installed at deploy time. `InvokeHarness` needs a
 recent `@aws-sdk/client-bedrock-agentcore`: the runtime had 3.1105.0 in
-`us-west-2` on 2026-10-06. The apply zips each folder as-is.
+`us-west-2` on 2026-10-06. The apply zips each folder as-is, which is why
+`xray.mjs` is in both folders.

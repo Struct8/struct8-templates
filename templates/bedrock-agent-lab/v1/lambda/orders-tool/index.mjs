@@ -10,8 +10,10 @@
 //                               connection to the table.
 
 import { DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { traceCalls } from './xray.mjs';
 
-const client = new DynamoDBClient({});
+// Each call is recorded in X-Ray under the table's name: see xray.mjs.
+const client = traceCalls(new DynamoDBClient({}), () => TABLE);
 const TABLE = process.env.AWS_DYNAMODB_TABLE_NAME_0;
 const TOOL_NAME_DELIMITER = '___';
 

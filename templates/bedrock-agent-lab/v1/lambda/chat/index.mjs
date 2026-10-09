@@ -26,13 +26,32 @@
 // None of them carries a node's name, so renaming a node or copying the template
 // changes no name here. The same connections grant the function its
 // permissions.
+//
+// Each call to the guardrail and to the harness is recorded in X-Ray as a
+// subsegment of the invocation: see xray.mjs.
 
 import { BedrockAgentCoreClient, InvokeHarnessCommand } from '@aws-sdk/client-bedrock-agentcore';
 import { ApplyGuardrailCommand, BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { createHash, randomUUID } from 'node:crypto';
+import { traceCalls } from './xray.mjs';
 
+// Named after the id at the end of each ARN, which the Struct8 canvas matches
+// to the node the status stamped with that ARN: the guardrail's id, and the
+// harness's `<name>-<suffix>`.
+const bedrock = traceCalls(new BedrockRuntimeClient({}), () => GUARDRAIL_ID);
 const agentcore = new BedrockAgentCoreClient({});
-const bedrock = new BedrockRuntimeClient({});
+// The harness answers in a stream, and send() resolves when the first bytes
+// arrive, before the agent has answered. Reading the stream inside the traced
+// call makes the subsegment last the whole answer.
+const harness = traceCalls(
+  {
+    async send(command) {
+      const response = await agentcore.send(command);
+      return { ...(await readStream(response.stream)), $metadata: response.$metadata };
+    }
+  },
+  () => String(HARNESS_ARN).split('/').pop()
+);
 const env = process.env;
 const HARNESS_ARN = env.AWS_BEDROCKAGENTCORE_HARNESS_ARN_0;
 const GUARDRAIL_ID = env.AWS_BEDROCK_GUARDRAIL_GUARDRAIL_ID_0;
@@ -228,7 +247,7 @@ async function ask({ question, sessionId, actorId }) {
       });
     }
 
-    const response = await agentcore.send(
+    const { answer, tools } = await harness.send(
       new InvokeHarnessCommand({
         harnessArn: HARNESS_ARN,
         runtimeSessionId: session,
@@ -236,7 +255,6 @@ async function ask({ question, sessionId, actorId }) {
         messages: [{ role: 'user', content: [{ text: input.text }] }]
       })
     );
-    const { answer, tools } = await readStream(response.stream);
 
     const output = answer ? await guard('OUTPUT', answer) : { action: 'NONE', text: '' };
     return json(200, {
