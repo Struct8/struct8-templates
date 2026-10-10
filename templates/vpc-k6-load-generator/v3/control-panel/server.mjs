@@ -194,7 +194,12 @@ function validateWordpress(input, errors) {
   if (!Number.isFinite(thinkMin) || !Number.isFinite(thinkMax) || thinkMin < 0 || thinkMax > 120 || thinkMin > thinkMax)
     errors.push("Reading time must go from a minimum to a maximum between 0 and 120 seconds.");
 
-  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true };
+  // Seconds; 0 never stops the run for slowness (wordpress.js ABORT_P95_S).
+  const abortP95 = Number(input.abortP95 ?? 30);
+  if (!Number.isFinite(abortP95) || abortP95 < 0 || abortP95 > 600)
+    errors.push("The slow-page limit must be a number of seconds from 0 to 600. Use 0 to never stop the test for slowness.");
+
+  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true, abortP95 };
   if (profile === "curve") {
     const curve = validatePoints(input.points, errors, RATE_LEVEL);
     return { ...common, points: curve.points, stages: curve.stages, startRate: curve.start, peak: curve.peak, totalSeconds: curve.totalSeconds };
@@ -376,6 +381,7 @@ async function start(cfg) {
       "-e", `THINK_MAX=${cfg.thinkMax}`,
       "-e", `MAX_VUS=${MAX_VUS}`,
       "-e", `FETCH_ASSETS=${cfg.fetchAssets ? "on" : "off"}`,
+      "-e", `ABORT_P95_S=${cfg.abortP95}`,
     );
   } else {
     // The single-URL test, exactly as v2 runs it.

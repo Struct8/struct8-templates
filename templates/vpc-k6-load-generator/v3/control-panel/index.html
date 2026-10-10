@@ -239,6 +239,11 @@
             </div>
           </div>
           <div class="field">
+            <label for="wpAbortP95">Stop if the slowest 5% of pages take over (s)</label>
+            <input id="wpAbortP95" type="number" min="0" max="600" value="30" aria-describedby="wpAbortHint" />
+            <div class="hint" id="wpAbortHint">Checked from the third minute on, over all pages since the start. 0 never stops the test for slowness. It always stops if more than 10% of pages fail.</div>
+          </div>
+          <div class="field">
             <label class="check"><input id="wpAssets" type="checkbox" /> Also download images, CSS and JS</label>
             <div class="hint">Off by default: behind a CDN they come from its cache and never reach WordPress.</div>
           </div>
@@ -973,6 +978,7 @@
             points: editors.wordpress.points.map((p) => ({ t: p.t, rate: p.v })),
             thinkMin: Number($("wpThinkMin").value), thinkMax: Number($("wpThinkMax").value),
             fetchAssets: $("wpAssets").checked,
+            abortP95: $("wpAbortP95").value === "" ? 30 : Number($("wpAbortP95").value),
           }
         : mode === "curve"
         ? { ...common, mode: "curve", points: editors.curve.points.map((p) => ({ t: p.t, vus: p.v })) }

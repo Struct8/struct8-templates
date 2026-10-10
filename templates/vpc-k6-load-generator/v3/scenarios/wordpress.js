@@ -38,6 +38,14 @@ const MAX_VUS = Number(__ENV.MAX_VUS || 1000);
 // cache and never reach WordPress. On, each visit downloads them once, like a
 // browser with an empty cache.
 const FETCH_ASSETS = (__ENV.FETCH_ASSETS || 'off') === 'on';
+// The run stops by itself when the slowest 5% of pages (p95) take longer than
+// this many seconds; 0 never stops it for slowness. The p95 counts every page
+// since the start, and the check begins only after ABORT_AFTER. A test of
+// autoscaling has to be allowed to go past the point where the site slows
+// down: a new task, and maybe a new instance, takes minutes to join, and
+// stopping at the first slow minute ends the run before it can show that.
+const ABORT_P95_MS = Math.round(Number(__ENV.ABORT_P95_S || 30) * 1000);
+const ABORT_AFTER = __ENV.ABORT_AFTER || '3m';
 
 const SEARCH_WORDS = (
   __ENV.SEARCH_WORDS ||
@@ -120,7 +128,9 @@ export const options = {
     ],
     'http_req_duration{kind:page}': [
       'p(95)<1500',
-      { threshold: 'p(95)<8000', abortOnFail: true, delayAbortEval: '1m' }
+      ...(ABORT_P95_MS > 0
+        ? [{ threshold: `p(95)<${ABORT_P95_MS}`, abortOnFail: true, delayAbortEval: ABORT_AFTER }]
+        : [])
     ],
     'http_req_duration{page:home}': ['p(95)<1000'],
     'http_req_duration{page:post}': ['p(95)<1000'],
