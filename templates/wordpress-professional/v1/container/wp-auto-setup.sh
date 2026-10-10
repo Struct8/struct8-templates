@@ -6,11 +6,21 @@
 # WORDPRESS_CONFIG_EXTRA (Redis Object Cache, WP Offload Media Lite and WP Offload
 # SES Lite), Two Factor, a must-use plugin with the site's hardening and, with
 # WP_DEMO_CONTENT=true, a sample site with photos and a contact form whose
-# messages are also kept in the administration panel. A marker on the EFS volume
-# ends every later start in under a second.
+# messages are also kept in the administration panel. With WP_SHOP=true it also
+# installs WooCommerce and fills a shop: products with photos, flat-rate and free
+# shipping, cash on delivery and a coupon. A marker on the EFS volume ends every
+# later start in under a second.
 #
 # WP_AUTO_SETUP=false turns it off, and the site starts on the WordPress
 # installation screen. A site somebody installed before this ran is left alone.
+#
+# The shop is off unless WP_SHOP is true. These variables set it up:
+#   WP_SHOP_COUNTRY   store country and state, default US:OR
+#   WP_SHOP_CURRENCY  default USD
+#   WP_SHOP_EMAILS    default false. WooCommerce sends an email for each order, and
+#                     an SES account in the sandbox accepts mail only for verified
+#                     addresses: with false, the shop's emails are turned off.
+#                     With true they go out from shop@ the site's address.
 
 log() { echo "wp-setup: $*"; }
 
@@ -375,11 +385,254 @@ if (wp_is_block_theme()) {
   }
 }
 
+// The shop reuses these photos instead of importing them a second time.
+$ids = array();
+foreach ($photos as $key => $photo) $ids[$key] = $photo['id'];
+update_option('struct8_demo_photos', $ids);
+
 add_option('struct8_demo_content', 1);
 echo 'wp-setup: ' . count($photos) . ' photos imported' . PHP_EOL;
 PHP
   if wp eval-file /tmp/struct8-demo.php; then log "demo content created"; else log "demo content was not created"; fi
   rm -f /tmp/struct8-demo.php
+fi
+
+case "$WP_SHOP" in
+  true|True|TRUE|1|yes|on) shop=yes ;;
+  *) shop=no ;;
+esac
+if [ "$shop" = yes ] && ! wp option get struct8_shop >/dev/null 2>&1; then
+  retry wp plugin install woocommerce --activate || log "plugin woocommerce was not installed"
+  if wp plugin is-active woocommerce; then
+    wp plugin auto-updates enable woocommerce || log "plugin auto-updates were not turned on"
+    # SES accepts mail only from an address of a verified identity, and the
+    # template verifies the site's own address.
+    host=${WP_SITE_URL#*://}
+    export WP_SHOP_MAIL_FROM="shop@${host%%/*}"
+    # One PHP run, like the demo: every wp command starts WordPress again.
+    cat > /tmp/struct8-shop.php <<'PHP'
+<?php
+// Shop of the WordPress Professional template, run by wp-auto-setup.sh.
+//
+// A small plant shop. The photos are the ones the demo content imported (or, with
+// no demo content, the theme's own), so the products have pictures without a
+// download. Stock is not managed: a test that buys all day never sells out.
+
+if (!class_exists('WooCommerce')) {
+  fwrite(STDERR, 'wp-setup: WooCommerce is not active' . PHP_EOL);
+  exit(1);
+}
+
+kses_remove_filters();
+require_once ABSPATH . 'wp-admin/includes/file.php';
+require_once ABSPATH . 'wp-admin/includes/media.php';
+require_once ABSPATH . 'wp-admin/includes/image.php';
+
+// WooCommerce warns the administrator by email when a payment method is turned
+// on, which this script does once. That warning is not sent.
+add_filter('woocommerce_email_enabled_admin_payment_gateway_enabled', '__return_false');
+
+function shop_env($name, $default) {
+  $value = getenv($name);
+  return ($value === false || $value === '') ? $default : $value;
+}
+
+$country = shop_env('WP_SHOP_COUNTRY', 'US:OR');
+$currency = shop_env('WP_SHOP_CURRENCY', 'USD');
+$emails = in_array(strtolower(shop_env('WP_SHOP_EMAILS', 'false')), array('true', '1', 'yes', 'on'), true);
+
+// Store settings. WooCommerce starts a new store in "coming soon" mode and sends
+// the administrator through a setup wizard; neither belongs on a site that is
+// ready when it starts.
+update_option('woocommerce_default_country', $country);
+update_option('woocommerce_currency', $currency);
+update_option('woocommerce_store_address', '1 Main Street');
+update_option('woocommerce_store_city', 'Portland');
+update_option('woocommerce_store_postcode', '97201');
+update_option('woocommerce_coming_soon', 'no');
+update_option('woocommerce_store_pages_only', 'no');
+update_option('woocommerce_allow_tracking', 'no');
+update_option('woocommerce_show_marketplace_suggestions', 'no');
+update_option('woocommerce_task_list_hidden', 'yes');
+update_option('woocommerce_onboarding_profile', array('skipped' => true));
+update_option('woocommerce_manage_stock', 'no');
+update_option('woocommerce_calc_taxes', 'no');
+update_option('woocommerce_enable_guest_checkout', 'yes');
+delete_transient('_wc_activation_redirect');
+
+// Orders go to tables of their own instead of wp_posts and wp_postmeta, where an
+// order takes a dozen rows. WooCommerce changes the storage only while there is no
+// order, which is true on a new site and not afterwards.
+try {
+  wc_get_container()->get(\Automattic\WooCommerce\Internal\DataStores\Orders\DataSynchronizer::class)->create_database_tables();
+  update_option('woocommerce_custom_orders_table_enabled', 'yes');
+  update_option('woocommerce_custom_orders_table_data_sync_enabled', 'no');
+} catch (Throwable $e) {
+  fwrite(STDERR, 'wp-setup: orders stay in the posts table: ' . $e->getMessage() . PHP_EOL);
+}
+
+if (wc_get_page_id('shop') < 1 || wc_get_page_id('cart') < 1 || wc_get_page_id('checkout') < 1) {
+  WC_Install::create_pages();
+}
+
+// Cash on delivery is the one method that needs no account with a payment
+// provider, and its orders go straight to "processing".
+update_option('woocommerce_cod_settings', array(
+  'enabled' => 'yes',
+  'title' => 'Cash on delivery',
+  'description' => 'Pay when your order arrives.',
+  'instructions' => 'Pay when your order arrives.',
+  'enable_for_methods' => array(),
+  'enable_for_virtual' => 'yes',
+));
+
+// The zone of "locations not covered by other zones" is every address.
+$zone = new WC_Shipping_Zone(0);
+if (!$zone->get_shipping_methods()) {
+  $flat = $zone->add_shipping_method('flat_rate');
+  update_option('woocommerce_flat_rate_' . $flat . '_settings', array('title' => 'Flat rate', 'tax_status' => 'none', 'cost' => '5.00'));
+  $free = $zone->add_shipping_method('free_shipping');
+  update_option('woocommerce_free_shipping_' . $free . '_settings', array('title' => 'Free shipping', 'requires' => 'min_amount', 'min_amount' => '50', 'ignore_discounts' => 'no'));
+}
+
+// Email. The shop's emails need the SES account out of the sandbox, or a
+// verified address for every customer; until then they are off.
+$mailer = WC()->mailer();
+foreach ($mailer->get_emails() as $email) {
+  if (!$emails) $email->update_option('enabled', 'no');
+}
+update_option('woocommerce_email_from_name', wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES));
+update_option('woocommerce_email_from_address', shop_env('WP_SHOP_MAIL_FROM', get_option('admin_email')));
+
+// Photos: the ones the demo content imported, or the theme's own.
+global $photos, $saved;
+$photos = array();
+$saved = get_option('struct8_demo_photos', array());
+
+function shop_photo($key, $name, $alt) {
+  global $photos, $saved;
+  if (isset($saved[$key]) && get_post($saved[$key])) {
+    $photos[$key] = (int) $saved[$key];
+    return;
+  }
+  $files = glob(get_template_directory() . '/assets/images/' . $name . '.*');
+  if (!$files) return;
+  $tmp = wp_tempnam($files[0]);
+  if (!$tmp || !copy($files[0], $tmp)) return;
+  $id = media_handle_sideload(array('name' => basename($files[0]), 'tmp_name' => $tmp), 0, $alt);
+  if (is_wp_error($id)) {
+    @unlink($tmp);
+    fwrite(STDERR, 'wp-setup: photo ' . $name . ' was not imported: ' . $id->get_error_message() . PHP_EOL);
+    return;
+  }
+  update_post_meta($id, '_wp_attachment_image_alt', $alt);
+  $photos[$key] = (int) $id;
+}
+
+shop_photo('hero', 'coming-soon-bg-image', 'A meadow of wildflowers with a lone tree');
+shop_photo('bloom', 'botany-flowers-closeup', 'White flowers with long green leaves');
+shop_photo('hibiscus', 'red-hibiscus-closeup', 'A red hibiscus flower');
+shop_photo('meadow', 'flower-meadow-square', 'A meadow of yellow and red flowers');
+shop_photo('birds', 'marshland-birds-square', 'Two birds standing in shallow water at sunset');
+shop_photo('coral', 'coral-square', 'Coral growing under the sea');
+shop_photo('creek', 'dallas-creek-square', 'A flower with orange petals against a dark background');
+shop_photo('purple', 'malibu-plantlife', 'A purple flower');
+
+function shop_category($name) {
+  $term = term_exists($name, 'product_cat');
+  if (!$term) $term = wp_insert_term($name, 'product_cat');
+  if (is_wp_error($term)) return 0;
+  return (int) (is_array($term) ? $term['term_id'] : $term);
+}
+
+function shop_product($sku, $name, $price, $sale, $category, $photo, $short, $featured = false) {
+  global $photos;
+  $product = new WC_Product_Simple();
+  $product->set_name($name);
+  $product->set_sku($sku);
+  $product->set_status('publish');
+  $product->set_catalog_visibility('visible');
+  $product->set_regular_price($price);
+  if ($sale !== '') $product->set_sale_price($sale);
+  $product->set_short_description($short);
+  $product->set_description($short . ' Sample product of the WordPress Professional template: edit it or delete it.');
+  $product->set_category_ids(array($category));
+  $product->set_manage_stock(false);
+  $product->set_stock_status('instock');
+  $product->set_featured($featured);
+  if (isset($photos[$photo])) $product->set_image_id($photos[$photo]);
+  return $product->save();
+}
+
+$plants = shop_category('Plants');
+$seeds = shop_category('Seeds and bulbs');
+$gifts = shop_category('Gifts');
+
+$count = 0;
+$items = array(
+  array('PLT-001', 'White Bloom Bouquet', '24.00', '', $plants, 'bloom', 'Long-stemmed white flowers, cut the day they ship.', true),
+  array('PLT-002', 'Red Hibiscus Plant', '18.00', '15.00', $plants, 'hibiscus', 'A potted hibiscus that flowers from spring to autumn.', true),
+  array('PLT-003', 'Purple Garden Pot', '21.00', '', $plants, 'purple', 'A purple flowering plant, ready to put outside.', false),
+  array('SED-001', 'Wildflower Meadow Seed Mix', '9.50', '', $seeds, 'meadow', 'Enough seed for ten square meters of meadow.', true),
+  array('SED-002', 'Orange Creek Lily Bulbs', '12.00', '', $seeds, 'creek', 'Ten bulbs that flower orange in early summer.', false),
+  array('SED-003', 'Hibiscus Seed Pack', '6.50', '', $seeds, 'hibiscus', 'Thirty seeds, with a sowing guide.', false),
+  array('SED-004', 'Meadow Seed Bomb Set', '14.00', '11.00', $seeds, 'meadow', 'Twelve seed bombs to throw where nothing grows.', false),
+  array('GFT-001', 'Wildflower Meadow Print', '29.00', '', $gifts, 'hero', 'A framed print of a meadow with a lone tree.', false),
+  array('GFT-002', 'Coral Garden Print', '35.00', '', $gifts, 'coral', 'A framed print of coral under the sea.', false),
+  array('GFT-003', 'Marsh Birds Print', '35.00', '', $gifts, 'birds', 'A framed print of two birds at sunset.', false),
+  array('GFT-004', 'Spring Garden Gift Box', '59.00', '', $gifts, 'bloom', 'A bouquet, a seed mix and a print in one box.', true),
+  array('GFT-005', 'Gardener\'s Starter Kit', '79.00', '69.00', $gifts, 'purple', 'Gloves, a trowel, seeds and a plant for a first garden.', false),
+);
+foreach ($items as $item) {
+  if (shop_product($item[0], $item[1], $item[2], $item[3], $item[4], $item[5], $item[6], $item[7])) $count++;
+}
+
+if (!wc_get_coupon_id_by_code('WELCOME10')) {
+  $coupon = new WC_Coupon();
+  $coupon->set_code('WELCOME10');
+  $coupon->set_discount_type('percent');
+  $coupon->set_amount(10);
+  $coupon->save();
+}
+
+// The home page of the demo content gets a row of products.
+$home = (int) get_option('page_on_front');
+if ($home && get_option('struct8_demo_content')) {
+  $page = get_post($home);
+  $more = "<!-- wp:heading {\"textAlign\":\"center\"} -->\n<h2 class=\"wp-block-heading has-text-align-center\">From the shop</h2>\n<!-- /wp:heading -->\n\n" .
+    "<!-- wp:shortcode -->\n[products limit=\"4\" columns=\"4\" visibility=\"featured\"]\n<!-- /wp:shortcode -->\n\n" .
+    "<!-- wp:buttons {\"layout\":{\"type\":\"flex\",\"justifyContent\":\"center\"}} -->\n<div class=\"wp-block-buttons\"><!-- wp:button -->\n<div class=\"wp-block-button\"><a class=\"wp-block-button__link wp-element-button\" href=\"" . esc_url(wc_get_page_permalink('shop')) . "\">Visit the shop</a></div>\n<!-- /wp:button --></div>\n<!-- /wp:buttons -->\n\n";
+  wp_update_post(array('ID' => $home, 'post_content' => $page->post_content . $more));
+}
+
+// The menu. A block theme lists every page when the site has no menu of its own,
+// and the pages WooCommerce creates would come first, with Checkout among them,
+// which a visitor cannot open with an empty cart. A menu holds the pages in the
+// order a shop is read; the header uses the latest menu of the site.
+if (wp_is_block_theme()) {
+  $links = '';
+  foreach (array('home', 'shop', 'blog', 'about', 'gallery', 'contact', 'cart', 'my-account') as $slug) {
+    $page = get_page_by_path($slug);
+    if (!$page) continue;
+    $links .= '<!-- wp:navigation-link ' . wp_json_encode(array('label' => $page->post_title, 'type' => 'page', 'id' => $page->ID, 'url' => get_permalink($page), 'kind' => 'post-type')) . " /-->\n";
+  }
+  if ($links !== '') {
+    wp_insert_post(array('post_type' => 'wp_navigation', 'post_status' => 'publish', 'post_name' => 'main-menu', 'post_title' => 'Main menu', 'post_content' => $links));
+    // The footer of the demo content lists the pages the same way.
+    $footers = get_posts(array('post_type' => 'wp_template_part', 'name' => 'footer', 'numberposts' => 1, 'post_status' => 'publish'));
+    if ($footers && strpos($footers[0]->post_content, '<!-- wp:page-list /-->') !== false) {
+      wp_update_post(array('ID' => $footers[0]->ID, 'post_content' => str_replace('<!-- wp:page-list /-->', $links, $footers[0]->post_content)));
+    }
+  }
+}
+
+flush_rewrite_rules(false);
+add_option('struct8_shop', 1);
+echo 'wp-setup: ' . $count . ' products created, emails ' . ($emails ? 'on' : 'off') . PHP_EOL;
+PHP
+    if wp eval-file /tmp/struct8-shop.php; then log "shop created"; else log "shop was not created"; fi
+    rm -f /tmp/struct8-shop.php
+  fi
 fi
 
 chown -R www-data:www-data "$SITE/wp-content" 2>/dev/null
