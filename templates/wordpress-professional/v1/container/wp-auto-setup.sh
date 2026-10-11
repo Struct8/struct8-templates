@@ -21,8 +21,484 @@
 #                     an SES account in the sandbox accepts mail only for verified
 #                     addresses: with false, the shop's emails are turned off.
 #                     With true they go out from shop@ the site's address.
+#
+# WP_TRACING=true turns on tracing, described in its own section below. It is
+# independent of WP_AUTO_SETUP and also runs on a site that is already set up.
 
 log() { echo "wp-setup: $*"; }
+
+# --- Tracing -------------------------------------------------------------------
+# With WP_TRACING=true, each web request becomes a trace: the WordPress request,
+# its database queries and its Redis commands, up to 10 spans for the same query
+# or command, with the totals on the request span. The trace takes the id the load
+# balancer gives the request (X-Amzn-Trace-Id), which is the trace_id field of
+# its access log, and carries the CloudFront request id (X-Amz-Cf-Id). The task's
+# OpenTelemetry collector receives the spans on 127.0.0.1:4318 and sends them to
+# AWS X-Ray.
+#
+# It runs on every start, before the setup below, and it never stops the site:
+# when a step fails, the site starts without tracing.
+#
+# The PHP extension and the PHP libraries are built once per site and kept on
+# the EFS volume, in .struct8-tracing. Every container starts from the clean
+# image, so each start points PHP at them again, which is two small files. The
+# first start builds them in the background, and Apache reloads when they are
+# ready. An image with another PHP version builds the extension again, once.
+#
+# Query text goes out without its values: the strings and numbers of each query
+# become `?`. Health checks of the load balancer are not traced.
+#
+# Optional settings:
+#   OTEL_SERVICE_NAME            name in the trace map, default wordpress
+#   OTEL_EXPORTER_OTLP_ENDPOINT  default http://127.0.0.1:4318
+#   OTEL_TRACES_SAMPLER_ARG      share of the requests traced, 0 to 1, default 1
+#
+# Turning it off: WP_TRACING=false. The files stay on the volume and are no
+# longer loaded.
+TRACING=/var/www/html/.struct8-tracing
+
+tracing_ready() {
+  [ -f "$TRACING/ext/$1/opentelemetry.so" ] && [ -f "$TRACING/vendor/autoload.php" ]
+}
+
+# The two configuration files of this container. The extension loads in every
+# PHP process; the bootstrap only in Apache, so WP-CLI below runs untraced.
+tracing_turn_on() {
+  printf 'extension=%s\n' "$TRACING/ext/$1/opentelemetry.so" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new &&
+    mv /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new /usr/local/etc/php/conf.d/zz-struct8-tracing.ini &&
+    printf 'php_admin_value auto_prepend_file %s\n' "$TRACING/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf.new &&
+    mv /etc/apache2/conf-enabled/struct8-tracing.conf.new /etc/apache2/conf-enabled/struct8-tracing.conf
+}
+
+# Builds what is missing. Two tasks start together on a new site: one builds,
+# the other waits for the files.
+tracing_build() {
+  lock=$TRACING/build-lock
+  waited=0
+  until mkdir "$lock" 2>/dev/null; do
+    if tracing_ready "$1"; then return 0; fi
+    if [ "$waited" -ge 900 ]; then
+      log "tracing: the build lock is 15 minutes old: taking it over"
+      rmdir "$lock" 2>/dev/null
+      waited=0
+    else
+      sleep 10
+      waited=$((waited + 10))
+    fi
+  done
+  tracing_build_locked "$1"
+  status=$?
+  rmdir "$lock" 2>/dev/null
+  return $status
+}
+
+tracing_build_locked() {
+  tracing_ready "$1" && return 0
+  work=$(mktemp -d) || return 1
+  rm -rf "$TRACING"/vendor.new.* "$TRACING"/ext/*/opentelemetry.so.new.*
+  so=$TRACING/ext/$1/opentelemetry.so
+  if [ ! -f "$so" ]; then
+    # The official image keeps the compiler; an image without it gets it here.
+    if ! command -v phpize >/dev/null || ! command -v gcc >/dev/null || ! command -v make >/dev/null || ! command -v autoconf >/dev/null; then
+      { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $PHPIZE_DEPS; } >"$work/apt.log" 2>&1 ||
+        { tail -5 "$work/apt.log"; rm -rf "$work"; return 1; }
+    fi
+    printf '\n' | pecl install -f opentelemetry >"$work/pecl.log" 2>&1 || { tail -5 "$work/pecl.log"; rm -rf "$work"; return 1; }
+    mkdir -p "$TRACING/ext/$1" &&
+      cp "$(php -r 'echo PHP_EXTENSION_DIR;')/opentelemetry.so" "$so.new.$$" && mv "$so.new.$$" "$so" || { rm -rf "$work"; return 1; }
+    log "tracing: PHP extension built for $1"
+  fi
+  if [ ! -f "$TRACING/vendor/autoload.php" ]; then
+    curl -fsSL --retry 3 -o "$work/composer.phar" https://getcomposer.org/download/latest-stable/composer.phar &&
+      sum=$(curl -fsSL --retry 3 https://getcomposer.org/download/latest-stable/composer.phar.sha256) &&
+      [ "$(sha256sum < "$work/composer.phar" | cut -d' ' -f1)" = "$(echo "$sum" | cut -d' ' -f1)" ] ||
+      { log "tracing: could not download Composer"; rm -rf "$work"; return 1; }
+    mkdir "$work/lib" && (
+      cd "$work/lib" &&
+        COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_HOME="$work/home" php -d extension="$so" "$work/composer.phar" require \
+          --no-interaction --no-progress --quiet --optimize-autoloader \
+          open-telemetry/sdk open-telemetry/exporter-otlp open-telemetry/opentelemetry-auto-wordpress php-http/guzzle7-adapter
+    ) >"$work/composer.log" 2>&1 || { tail -5 "$work/composer.log"; rm -rf "$work"; return 1; }
+    cp -a "$work/lib/vendor" "$TRACING/vendor.new.$$" && rm -rf "$TRACING/vendor" && mv "$TRACING/vendor.new.$$" "$TRACING/vendor" ||
+      { rm -rf "$work"; return 1; }
+    log "tracing: PHP libraries installed"
+  fi
+  rm -rf "$work"
+}
+
+# Apache reads the two files when it starts. A build that ends later makes it
+# reload them with a graceful restart (SIGUSR1), which lets requests in progress
+# finish. The signal goes to the running Apache only: apache2ctl would start a
+# second one when the first is not up yet.
+tracing_reload_apache() {
+  pidfile=/var/run/apache2/apache2.pid
+  waited=0
+  until [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; do
+    [ "$waited" -ge 1200 ] && return 1
+    sleep 5
+    waited=$((waited + 5))
+  done
+  kill -USR1 "$(cat "$pidfile")"
+}
+
+tracing_write_bootstrap() {
+  cat > "$TRACING/bootstrap.php.new.$$" <<'PHP' && mv "$TRACING/bootstrap.php.new.$$" "$TRACING/bootstrap.php"
+<?php
+// Tracing of the WordPress Professional template, written by wp-auto-setup.sh on
+// each start when WP_TRACING is true. Apache runs it before each request
+// (auto_prepend_file). A failure here leaves that request untraced and changes
+// nothing else.
+declare(strict_types=1);
+
+namespace Struct8Tracing;
+
+use OpenTelemetry\API\Common\Time\Clock;
+use OpenTelemetry\API\LoggerHolder;
+use OpenTelemetry\API\Trace\Span;
+use OpenTelemetry\API\Trace\SpanKind;
+use OpenTelemetry\API\Trace\StatusCode;
+use OpenTelemetry\Context\Context;
+use OpenTelemetry\Context\ContextInterface;
+use OpenTelemetry\Context\Propagation\NoopTextMapPropagator;
+use OpenTelemetry\Contrib\Otlp\OtlpHttpTransportFactory;
+use OpenTelemetry\Contrib\Otlp\SpanExporter;
+use OpenTelemetry\SDK\Common\Attribute\Attributes;
+use OpenTelemetry\SDK\Common\Future\CancellationInterface;
+use OpenTelemetry\SDK\Resource\ResourceInfo;
+use OpenTelemetry\SDK\Resource\ResourceInfoFactory;
+use OpenTelemetry\SDK\Sdk;
+use OpenTelemetry\SDK\Trace\IdGeneratorInterface;
+use OpenTelemetry\SDK\Trace\ReadableSpanInterface;
+use OpenTelemetry\SDK\Trace\ReadWriteSpanInterface;
+use OpenTelemetry\SDK\Trace\Sampler\AlwaysOnSampler;
+use OpenTelemetry\SDK\Trace\Sampler\TraceIdRatioBasedSampler;
+use OpenTelemetry\SDK\Trace\SpanProcessor\BatchSpanProcessor;
+use OpenTelemetry\SDK\Trace\SpanProcessorInterface;
+use OpenTelemetry\SDK\Trace\TracerProvider;
+use Psr\Log\AbstractLogger;
+use Psr\Log\LogLevel;
+
+function setting(string $name, string $default): string
+{
+    $value = \getenv($name);
+    return \is_string($value) && $value !== '' ? $value : $default;
+}
+
+// The values of a query become `?`: a query can carry an email address, a
+// password hash or a session token, and the trace keeps only its shape.
+function shape(string $sql): string
+{
+    $sql = \preg_replace("/'(?:[^'\\\\]|\\\\.|'')*'/s", "'?'", $sql) ?? '?';
+    $sql = \preg_replace('/"(?:[^"\\\\]|\\\\.)*"/s', '"?"', $sql) ?? '?';
+    $sql = \preg_replace('/(?<![\w$`.])-?\d+(?:\.\d+)?\b/', '?', $sql) ?? '?';
+    return \mb_substr($sql, 0, 2048);
+}
+
+function start(): void
+{
+    // The SDK writes a failed export with its whole stack trace, about 3 KB in the
+    // log on every request while the collector is down. One line says the same.
+    LoggerHolder::set(new class () extends AbstractLogger {
+        public function log($level, string|\Stringable $message, array $context = []): void
+        {
+            if (!\in_array($level, [LogLevel::WARNING, LogLevel::ERROR, LogLevel::CRITICAL, LogLevel::ALERT, LogLevel::EMERGENCY], true)) {
+                return;
+            }
+            $line = (string) $message;
+            for ($e = $context['exception'] ?? null; $e instanceof \Throwable; $e = $e->getPrevious()) {
+                $line .= ': ' . $e->getMessage();
+            }
+            \error_log('struct8-tracing: ' . \mb_substr($line, 0, 500));
+        }
+    });
+
+    // The load balancer starts the trace: it sends `Root=1-<8 hex>-<24 hex>` and
+    // no parent, which no OpenTelemetry propagator accepts. The first trace id
+    // this request asks for is that root, so the trace and the load balancer's log
+    // line share an id. Every other id starts with the time, as X-Ray expects.
+    $root = null;
+    if (\preg_match('/(?:^|;)\s*Root=1-([0-9a-f]{8})-([0-9a-f]{24})\s*(?:;|$)/i', (string) ($_SERVER['HTTP_X_AMZN_TRACE_ID'] ?? ''), $m)) {
+        $root = \strtolower($m[1] . $m[2]);
+    }
+    $ids = new class ($root) implements IdGeneratorInterface {
+        public function __construct(private ?string $next)
+        {
+        }
+
+        public function generateTraceId(): string
+        {
+            if ($this->next !== null) {
+                [$id, $this->next] = [$this->next, null];
+                return $id;
+            }
+            return \sprintf('%08x', \time()) . \bin2hex(\random_bytes(12));
+        }
+
+        public function generateSpanId(): string
+        {
+            do {
+                $id = \bin2hex(\random_bytes(8));
+            } while ($id === '0000000000000000');
+            return $id;
+        }
+    };
+
+    // No retry and a short timeout: a collector that is down costs each request
+    // one refused connection on localhost, not seconds.
+    $exporter = new SpanExporter((new OtlpHttpTransportFactory())->create(
+        \rtrim(setting('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://127.0.0.1:4318'), '/') . '/v1/traces',
+        'application/x-protobuf',
+        [],
+        null,
+        2.0,
+        100,
+        0,
+    ));
+
+    // The WordPress instrumentation names its database spans `wpdb.*` and gives
+    // them no server: these attributes put the database in the trace map, and the
+    // query text loses its values. A span with no parent that is not the request
+    // itself ran outside any request span: it is dropped, as it would be a trace
+    // of one span.
+    //
+    // A page can repeat one query or one Redis command hundreds of times: the
+    // shop page of the demo site ran the same media lookup 754 times and 857
+    // Redis GETs, 1672 spans in all. Spans are billed by volume, and X-Ray keeps
+    // at most 500 KB of each trace. So only the first 10 spans of each query
+    // text and of each Redis command are sent, and the request span carries the
+    // totals: queries, commands, the time they took and the spans not sent.
+    $dbHost = \explode(':', setting('WORDPRESS_DB_HOST', 'mysql'))[0];
+    $processor = new class (new BatchSpanProcessor($exporter, Clock::getDefault()), $dbHost) implements SpanProcessorInterface {
+        private const REPEATS = 10;
+
+        /** @var array<string, int> */
+        private array $seen = [];
+        private array $totals = ['mysql' => [0, 0], 'redis' => [0, 0]];
+        private int $notSent = 0;
+
+        public function __construct(private SpanProcessorInterface $next, private string $dbHost)
+        {
+        }
+
+        /** @return array<string, int|float> */
+        public function totals(): array
+        {
+            return [
+                'wp.db.queries' => $this->totals['mysql'][0],
+                'wp.db.duration_ms' => \round($this->totals['mysql'][1] / 1e6, 1),
+                'wp.redis.commands' => $this->totals['redis'][0],
+                'wp.redis.duration_ms' => \round($this->totals['redis'][1] / 1e6, 1),
+                'wp.spans_not_sent' => $this->notSent,
+            ];
+        }
+
+        private static function stray(ReadableSpanInterface $span): bool
+        {
+            return !$span->getParentContext()->isValid() && $span->getKind() !== SpanKind::KIND_SERVER;
+        }
+
+        public function onStart(ReadWriteSpanInterface $span, ContextInterface $parentContext): void
+        {
+            if (self::stray($span)) {
+                return;
+            }
+            if (\str_starts_with($span->getName(), 'wpdb.')) {
+                $span->setAttribute('db.system', 'mysql');
+                $span->setAttribute('db.system.name', 'mysql');
+                $span->setAttribute('server.address', $this->dbHost);
+                $sql = $span->getAttribute('db.query.text');
+                if (\is_string($sql)) {
+                    $sql = shape($sql);
+                    $span->setAttribute('db.query.text', $sql);
+                    $operation = \strtoupper((string) \strtok(\ltrim($sql), " \t\r\n("));
+                    if ($operation !== '') {
+                        $span->setAttribute('db.operation.name', $operation);
+                    }
+                }
+            }
+            $this->next->onStart($span, $parentContext);
+        }
+
+        public function onEnd(ReadableSpanInterface $span): void
+        {
+            if (self::stray($span)) {
+                return;
+            }
+            $system = $span->getName() === 'wpdb.query' ? 'mysql' : $span->getAttribute('db.system');
+            if ($system === 'mysql' || $system === 'redis') {
+                $this->totals[$system][0]++;
+                $this->totals[$system][1] += $span->getDuration();
+            }
+            if ($span->getKind() === SpanKind::KIND_CLIENT) {
+                $key = $span->getName() . "\n" . (string) $span->getAttribute('db.query.text');
+                $this->seen[$key] = ($this->seen[$key] ?? 0) + 1;
+                if ($this->seen[$key] > self::REPEATS) {
+                    $this->notSent++;
+                    return;
+                }
+            }
+            $this->next->onEnd($span);
+        }
+
+        public function forceFlush(?CancellationInterface $cancellation = null): bool
+        {
+            return $this->next->forceFlush($cancellation);
+        }
+
+        public function shutdown(?CancellationInterface $cancellation = null): bool
+        {
+            return $this->next->shutdown($cancellation);
+        }
+    };
+
+    $ratio = \getenv('OTEL_TRACES_SAMPLER_ARG');
+    $sampler = \is_numeric($ratio) && (float) $ratio < 1
+        ? new TraceIdRatioBasedSampler(\max(0.0, (float) $ratio))
+        : new AlwaysOnSampler();
+    $resource = ResourceInfoFactory::defaultResource()->merge(ResourceInfo::create(Attributes::create([
+        'service.name' => setting('OTEL_SERVICE_NAME', 'wordpress'),
+    ])));
+    $provider = new TracerProvider($processor, $sampler, $resource, null, $ids);
+    // No propagator: a `traceparent` header sent by a visitor would otherwise
+    // choose the trace id, and the trace would no longer match the load balancer.
+    Sdk::builder()
+        ->setTracerProvider($provider)
+        ->setPropagator(NoopTextMapPropagator::getInstance())
+        ->buildAndRegisterGlobal();
+
+    // Redis Object Cache talks to Redis through Predis, which has no OpenTelemetry
+    // instrumentation: one span per command, and one per pipeline.
+    $tracer = $provider->getTracer('struct8-wordpress');
+    $redis = static function (string $name) use ($tracer): void {
+        $span = $tracer->spanBuilder($name)
+            ->setSpanKind(SpanKind::KIND_CLIENT)
+            ->setAttribute('db.system', 'redis')
+            ->setAttribute('db.system.name', 'redis')
+            ->setAttribute('db.operation.name', $name)
+            ->setAttribute('server.address', \defined('WP_REDIS_HOST') ? (string) \constant('WP_REDIS_HOST') : 'redis')
+            ->startSpan();
+        Context::storage()->attach($span->storeInContext(Context::getCurrent()));
+    };
+    $end = static function ($object, ?array $params, mixed $returnValue, ?\Throwable $exception): void {
+        $scope = Context::storage()->scope();
+        if ($scope === null) {
+            return;
+        }
+        $scope->detach();
+        $span = Span::fromContext($scope->context());
+        if ($exception !== null) {
+            $span->recordException($exception);
+            $span->setStatus(StatusCode::STATUS_ERROR);
+        }
+        $span->end();
+    };
+    \OpenTelemetry\Instrumentation\hook(
+        class: 'Predis\Client',
+        function: 'executeCommand',
+        pre: static function ($client, ?array $params) use ($redis): void {
+            $command = $params[0] ?? null;
+            $redis(\is_object($command) && \method_exists($command, 'getId') ? (string) $command->getId() : 'COMMAND');
+        },
+        post: $end,
+    );
+    \OpenTelemetry\Instrumentation\hook(
+        class: 'Predis\Pipeline\Pipeline',
+        function: 'execute',
+        pre: static function () use ($redis): void {
+            $redis('PIPELINE');
+        },
+        post: $end,
+    );
+
+    // WordPress runs its `shutdown` action after the WordPress instrumentation has
+    // ended the request span; WooCommerce saves the visitor's session there. That
+    // work goes in a WP.shutdown span under the request, which therefore ends
+    // after the request span.
+    $request = null;
+    \OpenTelemetry\Instrumentation\hook(
+        class: null,
+        function: 'shutdown_action_hook',
+        pre: static function () use ($tracer, &$request): void {
+            if ($request === null) {
+                Context::storage()->attach(Context::getCurrent());
+                return;
+            }
+            $span = $tracer->spanBuilder('WP.shutdown')->setParent($request)->startSpan();
+            Context::storage()->attach($span->storeInContext($request));
+        },
+        post: $end,
+    );
+
+    // The WordPress instrumentation ends the request span in a shutdown function
+    // of its own, registered after this one. So this one still sees the request
+    // span open, and the one it registers runs last, after every span has ended:
+    // the spans are sent once all of them are finished.
+    \register_shutdown_function(static function () use ($provider, $processor, &$request): void {
+        $span = Span::getCurrent();
+        if ($span->getContext()->isValid()) {
+            $request = Context::getCurrent();
+        }
+        $span->setAttributes($processor->totals());
+        $status = \http_response_code();
+        if (\is_int($status)) {
+            $span->setAttribute('http.response.status_code', $status);
+            if ($status >= 500) {
+                $span->setStatus(StatusCode::STATUS_ERROR);
+            }
+        }
+        $cloudfront = (string) ($_SERVER['HTTP_X_AMZ_CF_ID'] ?? '');
+        if ($cloudfront !== '') {
+            $span->setAttribute('http.request.header.x-amz-cf-id', [$cloudfront]);
+        }
+        \register_shutdown_function(static function () use ($provider): void {
+            $provider->shutdown();
+        });
+    });
+}
+
+(static function (): void {
+    if (\PHP_SAPI === 'cli' || !\extension_loaded('opentelemetry')) {
+        return;
+    }
+    // A health check every few seconds per task would bury the requests.
+    if (\str_starts_with((string) ($_SERVER['HTTP_USER_AGENT'] ?? ''), 'ELB-HealthChecker')) {
+        return;
+    }
+    try {
+        require __DIR__ . '/vendor/autoload.php';
+        start();
+    } catch (\Throwable $e) {
+        \error_log('struct8-tracing: this request is not traced: ' . $e->getMessage());
+    }
+})();
+PHP
+}
+
+tracing() {
+  case "$WP_TRACING" in
+    true|True|TRUE|1|yes|on) ;;
+    *) return 0 ;;
+  esac
+  api=$(basename "$(php -r 'echo PHP_EXTENSION_DIR;')") && [ -n "$api" ] || return 1
+  mkdir -p "$TRACING" || return 1
+  # The folder is under the site's document root: nothing in it is served.
+  printf 'Require all denied\n' > "$TRACING/.htaccess" || return 1
+  tracing_write_bootstrap || return 1
+  if tracing_ready "$api"; then
+    tracing_turn_on "$api" && log "tracing: on"
+    return
+  fi
+  log "tracing: building the PHP extension and libraries in the background; Apache reloads when they are ready"
+  (
+    unset WP_ADMIN_PASSWORD DB_ADMIN_USER DB_ADMIN_PASSWORD WORDPRESS_DB_PASSWORD WP_DB_BOOTSTRAP
+    if tracing_build "$api" && tracing_ready "$api" && tracing_turn_on "$api"; then
+      if tracing_reload_apache; then log "tracing: on"; else log "tracing: Apache did not start; tracing waits for the next start"; fi
+    else
+      log "tracing: the build failed; the site runs without tracing until the next start"
+    fi
+  ) &
+}
+tracing || log "tracing: could not be turned on; the site starts without it"
 
 case "$WP_AUTO_SETUP" in
   false|False|FALSE|0|no|off) log "WP_AUTO_SETUP is off: nothing to do"; exit 0 ;;
