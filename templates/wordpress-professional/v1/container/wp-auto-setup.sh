@@ -36,6 +36,11 @@ log() { echo "wp-setup: $*"; }
 # OpenTelemetry collector receives the spans on 127.0.0.1:4318 and sends them to
 # AWS X-Ray.
 #
+# In the X-Ray trace map the database is one node and Redis is another, each
+# named by the id of the resource: the cluster id of an Aurora or RDS endpoint
+# and the replication group id of an ElastiCache endpoint, the last part of their
+# ARNs. Each query and each Redis command is in the trace, not in the map.
+#
 # A CloudFront viewer request function can start the trace at the edge: it
 # writes that id itself and `X-Request-Start: t=<milliseconds>`, the time the
 # request reached CloudFront. The trace then begins with a CloudFront span, from
@@ -202,6 +207,31 @@ function shape(string $sql): string
     return \mb_substr($sql, 0, 2048);
 }
 
+// The name X-Ray gives the node a database or Redis span calls (peer.service).
+// Without it X-Ray names that node after the span: one node per Redis command
+// (GET, SET, SETEX...) and one per kind of database call (wpdb.query,
+// wpdb.db_connect). An AWS endpoint becomes the id of the resource behind it,
+// which is also the last part of that resource's ARN:
+//   wp-aurora.cluster-c9g6oy6oylb0.us-west-2.rds.amazonaws.com -> wp-aurora
+//   master.wp-object-cache.lgjfeo.usw2.cache.amazonaws.com     -> wp-object-cache
+// Any other host is kept as it is.
+function peer(string $host): string
+{
+    $host = \strtolower(\trim($host));
+    $labels = \explode('.', $host);
+    if (\str_ends_with($host, '.rds.amazonaws.com')) {
+        return $labels[0];
+    }
+    if (\str_ends_with($host, '.cache.amazonaws.com')) {
+        // The primary, reader and configuration endpoints put their role first.
+        if (\in_array($labels[0], ['master', 'replica', 'clustercfg'], true) && isset($labels[1])) {
+            return $labels[1];
+        }
+        return $labels[0];
+    }
+    return $host;
+}
+
 function start(): void
 {
     // The SDK writes a failed export with its whole stack trace, about 3 KB in the
@@ -315,6 +345,7 @@ function start(): void
                 $span->setAttribute('db.system', 'mysql');
                 $span->setAttribute('db.system.name', 'mysql');
                 $span->setAttribute('server.address', $this->dbHost);
+                $span->setAttribute('peer.service', peer($this->dbHost));
                 $sql = $span->getAttribute('db.query.text');
                 if (\is_string($sql)) {
                     $sql = shape($sql);
@@ -421,14 +452,19 @@ function start(): void
     }
 
     // Redis Object Cache talks to Redis through Predis, which has no OpenTelemetry
-    // instrumentation: one span per command, and one per pipeline.
+    // instrumentation: one span per command, and one per pipeline. The command is
+    // the span's name and `db.operation.name`; the node in the trace map is the
+    // Redis server. WP_REDIS_HOST comes from wp-config.php, which loads after this
+    // file, so it is read when a command runs.
     $redis = static function (string $name) use ($tracer): void {
+        $host = \defined('WP_REDIS_HOST') ? (string) \constant('WP_REDIS_HOST') : 'redis';
         $span = $tracer->spanBuilder($name)
             ->setSpanKind(SpanKind::KIND_CLIENT)
             ->setAttribute('db.system', 'redis')
             ->setAttribute('db.system.name', 'redis')
             ->setAttribute('db.operation.name', $name)
-            ->setAttribute('server.address', \defined('WP_REDIS_HOST') ? (string) \constant('WP_REDIS_HOST') : 'redis')
+            ->setAttribute('server.address', $host)
+            ->setAttribute('peer.service', peer($host))
             ->startSpan();
         Context::storage()->attach($span->storeInContext(Context::getCurrent()));
     };
