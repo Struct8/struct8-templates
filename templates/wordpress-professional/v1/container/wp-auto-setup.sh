@@ -44,8 +44,11 @@ log() { echo "wp-setup: $*"; }
 # A CloudFront viewer request function can start the trace at the edge: it
 # writes that id itself and `X-Request-Start: t=<milliseconds>`, the time the
 # request reached CloudFront. The trace then begins with a CloudFront span, from
-# that time to the end of the request, with the WordPress request under it. The
-# function is in the template's diagram; this script only reads the two headers.
+# that time to the end of the request, with the WordPress request under it. When
+# the function also writes `X-Cdn-Distribution-Id`, the CloudFront node of the
+# trace map is named by the distribution's id, the last part of its ARN; without
+# it the node is `CloudFront`. The function is in the template's diagram; this
+# script only reads the headers.
 #
 # It runs on every start, before the setup below, and it never stops the site:
 # when a step fails, the site starts without tracing.
@@ -435,18 +438,31 @@ function start(): void
     // `aws.local.service` puts a CloudFront node in front of WordPress in the
     // X-Ray map. The edge clock and this one can differ by a few milliseconds: a
     // time up to a second ahead counts as no wait, and one further off is ignored.
+    //
+    // That node is named by the distribution's id when the function sent it
+    // (X-Cdn-Distribution-Id): the id is the last part of the distribution's ARN,
+    // which is how the Struct8 canvas finds the distribution's box. Named
+    // `CloudFront`, the node matched no box, and the canvas drew no line from
+    // the distribution to WordPress. The function writes the header on every
+    // request, so a visitor cannot choose the name.
     $edgeScope = null;
     if (\preg_match('/^t=(\d{13})$/', (string) ($_SERVER['HTTP_X_REQUEST_START'] ?? ''), $m)) {
         $arrived = (int) \round((float) ($_SERVER['REQUEST_TIME_FLOAT'] ?? \microtime(true)) * 1000);
         $sent = (int) $m[1];
         if ($sent > $arrived - 60000 && $sent < $arrived + 1000) {
             $sent = \min($sent, $arrived);
-            $edge = $tracer->spanBuilder('CloudFront')
+            $distribution = (string) ($_SERVER['HTTP_X_CDN_DISTRIBUTION_ID'] ?? '');
+            $builder = $tracer->spanBuilder('CloudFront')
                 ->setSpanKind(SpanKind::KIND_SERVER)
                 ->setStartTimestamp($sent * 1000000)
-                ->setAttribute('aws.local.service', 'CloudFront')
-                ->setAttribute('cloudfront.edge_to_app_ms', $arrived - $sent)
-                ->startSpan();
+                ->setAttribute('cloudfront.edge_to_app_ms', $arrived - $sent);
+            if (\preg_match('/^[A-Z0-9]{6,32}$/', $distribution)) {
+                $builder->setAttribute('aws.local.service', $distribution)
+                    ->setAttribute('cloudfront.distribution_id', $distribution);
+            } else {
+                $builder->setAttribute('aws.local.service', 'CloudFront');
+            }
+            $edge = $builder->startSpan();
             $edgeScope = Context::storage()->attach($edge->storeInContext(Context::getCurrent()));
         }
     }
