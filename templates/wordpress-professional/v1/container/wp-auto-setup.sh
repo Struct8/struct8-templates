@@ -125,7 +125,9 @@ tracing_build_locked() {
           --no-interaction --no-progress --quiet --optimize-autoloader \
           open-telemetry/sdk open-telemetry/exporter-otlp open-telemetry/opentelemetry-auto-wordpress php-http/guzzle7-adapter
     ) >"$work/composer.log" 2>&1 || { tail -5 "$work/composer.log"; rm -rf "$work"; return 1; }
-    cp -a "$work/lib/vendor" "$TRACING/vendor.new.$$" && rm -rf "$TRACING/vendor" && mv "$TRACING/vendor.new.$$" "$TRACING/vendor" ||
+    # Not `cp -a`: the EFS access point does not let the copy keep the owner, so
+    # every file fails with "failed to preserve ownership" and cp exits 1.
+    cp -R "$work/lib/vendor" "$TRACING/vendor.new.$$" && rm -rf "$TRACING/vendor" && mv "$TRACING/vendor.new.$$" "$TRACING/vendor" ||
       { rm -rf "$work"; return 1; }
     log "tracing: PHP libraries installed"
   fi
