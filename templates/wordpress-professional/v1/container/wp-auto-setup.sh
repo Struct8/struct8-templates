@@ -31,10 +31,16 @@ log() { echo "wp-setup: $*"; }
 # With WP_TRACING=true, each web request becomes a trace: the WordPress request,
 # its database queries and its Redis commands, up to 10 spans for the same query
 # or command, with the totals on the request span. The trace takes the id the load
-# balancer gives the request (X-Amzn-Trace-Id), which is the trace_id field of
-# its access log, and carries the CloudFront request id (X-Amz-Cf-Id). The task's
+# balancer passes on (X-Amzn-Trace-Id), which is the trace_id field of its access
+# log, and carries the CloudFront request id (X-Amz-Cf-Id). The task's
 # OpenTelemetry collector receives the spans on 127.0.0.1:4318 and sends them to
 # AWS X-Ray.
+#
+# A CloudFront viewer request function can start the trace at the edge: it
+# writes that id itself and `X-Request-Start: t=<milliseconds>`, the time the
+# request reached CloudFront. The trace then begins with a CloudFront span, from
+# that time to the end of the request, with the WordPress request under it. The
+# function is in the template's diagram; this script only reads the two headers.
 #
 # It runs on every start, before the setup below, and it never stops the site:
 # when a step fails, the site starts without tracing.
@@ -212,8 +218,9 @@ function start(): void
         }
     });
 
-    // The load balancer starts the trace: it sends `Root=1-<8 hex>-<24 hex>` and
-    // no parent, which no OpenTelemetry propagator accepts. The first trace id
+    // The load balancer sends `Root=1-<8 hex>-<24 hex>` and no parent, which no
+    // OpenTelemetry propagator accepts. It writes that root when the request has
+    // none, and keeps the one the CloudFront function wrote. The first trace id
     // this request asks for is that root, so the trace and the load balancer's log
     // line share an id. Every other id starts with the time, as X-Ray expects.
     $root = null;
@@ -365,10 +372,54 @@ function start(): void
         ->setTracerProvider($provider)
         ->setPropagator(NoopTextMapPropagator::getInstance())
         ->buildAndRegisterGlobal();
+    $tracer = $provider->getTracer('struct8-wordpress');
+
+    // The WordPress instrumentation also opens its steps (WP.init, WP.main and
+    // the others) as server spans. X-Ray makes each server span a segment and
+    // counts it as one more request to WordPress: a page counted as eight. A
+    // server span that starts under another span of this request, other than the
+    // CloudFront span below, opens as an internal span instead. The extension
+    // binds hooks to a function on its first call in the request, so this comes
+    // before the CloudFront span is built.
+    $edge = null;
+    \OpenTelemetry\Instrumentation\hook(
+        class: \OpenTelemetry\SDK\Trace\SpanBuilder::class,
+        function: 'setSpanKind',
+        pre: static function ($builder, array $params) use (&$edge): ?array {
+            $current = Span::getCurrent();
+            if (($params[0] ?? null) !== SpanKind::KIND_SERVER || !$current->getContext()->isValid() || $current === $edge) {
+                return null;
+            }
+            return [0 => SpanKind::KIND_INTERNAL];
+        },
+    );
+
+    // CloudFront sends no spans. When its function wrote `X-Request-Start`, this
+    // span stands for it: it starts at that time and ends after the request, and
+    // the WordPress request span opens under it, because the WordPress
+    // instrumentation takes the current context as its parent. The time before
+    // the request span is CloudFront, the load balancer and the wait for PHP, and
+    // `aws.local.service` puts a CloudFront node in front of WordPress in the
+    // X-Ray map. The edge clock and this one can differ by a few milliseconds: a
+    // time up to a second ahead counts as no wait, and one further off is ignored.
+    $edgeScope = null;
+    if (\preg_match('/^t=(\d{13})$/', (string) ($_SERVER['HTTP_X_REQUEST_START'] ?? ''), $m)) {
+        $arrived = (int) \round((float) ($_SERVER['REQUEST_TIME_FLOAT'] ?? \microtime(true)) * 1000);
+        $sent = (int) $m[1];
+        if ($sent > $arrived - 60000 && $sent < $arrived + 1000) {
+            $sent = \min($sent, $arrived);
+            $edge = $tracer->spanBuilder('CloudFront')
+                ->setSpanKind(SpanKind::KIND_SERVER)
+                ->setStartTimestamp($sent * 1000000)
+                ->setAttribute('aws.local.service', 'CloudFront')
+                ->setAttribute('cloudfront.edge_to_app_ms', $arrived - $sent)
+                ->startSpan();
+            $edgeScope = Context::storage()->attach($edge->storeInContext(Context::getCurrent()));
+        }
+    }
 
     // Redis Object Cache talks to Redis through Predis, which has no OpenTelemetry
     // instrumentation: one span per command, and one per pipeline.
-    $tracer = $provider->getTracer('struct8-wordpress');
     $redis = static function (string $name) use ($tracer): void {
         $span = $tracer->spanBuilder($name)
             ->setSpanKind(SpanKind::KIND_CLIENT)
@@ -432,25 +483,32 @@ function start(): void
     // The WordPress instrumentation ends the request span in a shutdown function
     // of its own, registered after this one. So this one still sees the request
     // span open, and the one it registers runs last, after every span has ended:
-    // the spans are sent once all of them are finished.
-    \register_shutdown_function(static function () use ($provider, $processor, &$request): void {
+    // the spans are sent once all of them are finished. The CloudFront span gets
+    // the status code and the CloudFront request id too, and ends last.
+    \register_shutdown_function(static function () use ($provider, $processor, $edge, $edgeScope, &$request): void {
         $span = Span::getCurrent();
         if ($span->getContext()->isValid()) {
             $request = Context::getCurrent();
         }
         $span->setAttributes($processor->totals());
         $status = \http_response_code();
-        if (\is_int($status)) {
-            $span->setAttribute('http.response.status_code', $status);
-            if ($status >= 500) {
-                $span->setStatus(StatusCode::STATUS_ERROR);
+        $cloudfront = (string) ($_SERVER['HTTP_X_AMZ_CF_ID'] ?? '');
+        foreach ($edge === null ? [$span] : [$span, $edge] as $target) {
+            if (\is_int($status)) {
+                $target->setAttribute('http.response.status_code', $status);
+                if ($status >= 500) {
+                    $target->setStatus(StatusCode::STATUS_ERROR);
+                }
+            }
+            if ($cloudfront !== '') {
+                $target->setAttribute('http.request.header.x-amz-cf-id', [$cloudfront]);
             }
         }
-        $cloudfront = (string) ($_SERVER['HTTP_X_AMZ_CF_ID'] ?? '');
-        if ($cloudfront !== '') {
-            $span->setAttribute('http.request.header.x-amz-cf-id', [$cloudfront]);
-        }
-        \register_shutdown_function(static function () use ($provider): void {
+        \register_shutdown_function(static function () use ($provider, $edge, $edgeScope): void {
+            if ($edge !== null) {
+                $edgeScope->detach();
+                $edge->end();
+            }
             $provider->shutdown();
         });
     });
