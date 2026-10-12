@@ -539,12 +539,28 @@ function start(): void
     // span open, and the one it registers runs last, after every span has ended:
     // the spans are sent once all of them are finished. The CloudFront span gets
     // the status code and the CloudFront request id too, and ends last.
+    //
+    // It also gets the request's method and URL. X-Ray's list of requests
+    // (GetTraceSummaries) takes them from the first segment of a trace, which is
+    // the CloudFront one: without them, every request through CloudFront is
+    // listed with no method and no URL. They are written here and not when the
+    // span starts, because wp-config.php, which loads in between, is what sets
+    // HTTPS behind the load balancer. Same values as the WordPress request span.
     \register_shutdown_function(static function () use ($provider, $processor, $edge, $edgeScope, &$request): void {
         $span = Span::getCurrent();
         if ($span->getContext()->isValid()) {
             $request = Context::getCurrent();
         }
         $span->setAttributes($processor->totals());
+        if ($edge !== null) {
+            $edge->setAttribute('http.request.method', (string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
+            $host = (string) ($_SERVER['HTTP_HOST'] ?? ($_SERVER['SERVER_NAME'] ?? ''));
+            if ($host !== '') {
+                $https = (string) ($_SERVER['HTTPS'] ?? '');
+                $scheme = $https !== '' && \strtolower($https) !== 'off' ? 'https' : 'http';
+                $edge->setAttribute('url.full', $scheme . '://' . $host . (string) ($_SERVER['REQUEST_URI'] ?? '/'));
+            }
+        }
         $status = \http_response_code();
         $cloudfront = (string) ($_SERVER['HTTP_X_AMZ_CF_ID'] ?? '');
         foreach ($edge === null ? [$span] : [$span, $edge] as $target) {
