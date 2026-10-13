@@ -807,11 +807,22 @@ class _FakeClient:
             raise RuntimeError('AccessDenied')
         return self.pages['list_tags']
 
+    def get_resources(self, **kwargs):
+        # Only what was asked for, the way the API answers: an ARN that is not in
+        # the list is never returned, tagged or not.
+        self.calls.append(('get_resources', kwargs))
+        if self.explode:
+            raise RuntimeError('AccessDenied')
+        wanted = set(kwargs.get('ResourceARNList', []))
+        return {'ResourceTagMappingList': [
+            mapping for mapping in self.pages.get('get_resources', [])
+            if mapping['ResourceARN'] in wanted]}
+
 
 VPC_PAGE = {'describe_vpcs': [{'Vpcs': [{
     'VpcId': 'vpc-lab', 'Tags': [{'Key': 'Name', 'Value': 'lab-vpc'}],
     'CidrBlockAssociationSet': [{'CidrBlock': '10.3.0.0/16'}]}]}]}
-CLIENTS_WERE = (pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client)
+CLIENTS_WERE = (pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging)
 
 calls = []
 pfl.ec2 = _FakeClient(VPC_PAGE, calls)
@@ -840,7 +851,9 @@ def interface(addresses, **fields):
 
 
 # Two instances of one Auto Scaling group, a NAT gateway, a load balancer, a Lambda
-# function, a database and an address nothing owns any more.
+# function, a database, an EFS mount target, an ElastiCache node, an RDS proxy and
+# an address nothing owns any more. The last three descriptions are copied from
+# interfaces of a real account.
 ACCOUNT_PAGES = {
     'describe_network_interfaces': [{'NetworkInterfaces': [
         interface(['10.3.0.11'], Attachment={'InstanceId': 'i-asg1'}),
@@ -851,6 +864,12 @@ ACCOUNT_PAGES = {
         interface(['10.3.0.40'], InterfaceType='lambda',
                   Description='AWS Lambda VPC ENI-process-orders-3f1c2b4a-1d2e-4f5a-9b8c-7d6e5f4a3b2c'),
         interface(['10.3.0.50'], Description='RDSNetworkInterface'),
+        interface(['10.3.0.60'], InterfaceType='efs', RequesterId='217513377182',
+                  Description='EFS mount target for fs-0ef6aa37297b5b3af (fsmt-0daeeb18ce9397a7c)'),
+        interface(['10.3.0.70'], InterfaceType='interface', RequesterId='amazon-elasticache',
+                  Description='ElastiCache wp-object-cache-001'),
+        interface(['10.3.0.80'], InterfaceType='interface', RequesterId='421361723402',
+                  Description='Network interface for DBProxy demo-aurora-rds-proxy'),
     ]}],
     'describe_instances': [{'Reservations': [{'Instances': [
         {'InstanceId': 'i-asg1', 'Tags': [{'Key': 'Name', 'Value': 'ASG'}]},
@@ -866,12 +885,29 @@ ACCOUNT_PAGES = {
                        + ':123456789012:loadbalancer/app/front-door/50dc6c495c0c9188',
         'Tags': [{'Key': 'Name', 'Value': 'FrontDoor'}]}]},
     'list_tags': {'Tags': {'Name': 'ProcessOrders'}},
+    'describe_db_proxies': [{'DBProxies': [
+        {'DBProxyName': 'other-proxy',
+         'DBProxyArn': 'arn:aws:rds:' + pfl.REGION + ':123456789012:db-proxy:prx-0other'},
+        {'DBProxyName': 'demo-aurora-rds-proxy',
+         'DBProxyArn': 'arn:aws:rds:' + pfl.REGION + ':123456789012:db-proxy:prx-0a1b2c3d'}]}],
+    'get_resources': [
+        {'ResourceARN': 'arn:aws:elasticfilesystem:' + pfl.REGION
+                        + ':123456789012:file-system/fs-0ef6aa37297b5b3af',
+         'Tags': [{'Key': 'Name', 'Value': 'wpContent'}]},
+        {'ResourceARN': 'arn:aws:elasticache:' + pfl.REGION + ':123456789012:cluster:wp-object-cache-001',
+         'Tags': [{'Key': 'Name', 'Value': 'wpRedis'}]},
+        {'ResourceARN': 'arn:aws:rds:' + pfl.REGION + ':123456789012:db-proxy:prx-0a1b2c3d',
+         'Tags': [{'Key': 'Name', 'Value': 'AuroraProxy'}]},
+        {'ResourceARN': 'arn:aws:rds:' + pfl.REGION + ':123456789012:db-proxy:prx-0other',
+         'Tags': [{'Key': 'Name', 'Value': 'OtherProxy'}]},
+    ],
 }
-EVERY = {'10.3.0.11', '10.3.0.12', '10.3.0.20', '10.3.0.30', '10.3.0.40', '10.3.0.50', '10.3.0.99'}
+EVERY = {'10.3.0.11', '10.3.0.12', '10.3.0.20', '10.3.0.30', '10.3.0.40', '10.3.0.50',
+         '10.3.0.60', '10.3.0.70', '10.3.0.80', '10.3.0.99'}
 
 calls = []
 fake = _FakeClient(ACCOUNT_PAGES, calls)
-pfl.ec2 = pfl.elbv2 = pfl.rds = pfl.lambda_client = fake
+pfl.ec2 = pfl.elbv2 = pfl.rds = pfl.lambda_client = pfl.tagging = fake
 pfl._owner_by_address.clear()
 pfl._rds_cache['expires_at'] = 0.0
 owners = pfl.owners_for_addresses(EVERY)
@@ -885,6 +921,19 @@ check('a Lambda function by its tag, the uuid after its name left out',
       owners.get('10.3.0.40') == ('ProcessOrders', 'lambda'), str(owners.get('10.3.0.40')))
 check('a database by its tag, through the address its endpoint resolves to',
       owners.get('10.3.0.50') == ('OrdersDb', 'rds'), str(owners.get('10.3.0.50')))
+check("an EFS mount target by the file system's tag, the id read off its description",
+      owners.get('10.3.0.60') == ('wpContent', 'efs'), str(owners.get('10.3.0.60')))
+check("an ElastiCache node by its cluster's tag, which the group's Name tag reaches",
+      owners.get('10.3.0.70') == ('wpRedis', 'elasticache'), str(owners.get('10.3.0.70')))
+check('an RDS proxy by its tag, its ARN looked up by the name on the interface',
+      owners.get('10.3.0.80') == ('AuroraProxy', 'rds_proxy'), str(owners.get('10.3.0.80')))
+asked_arns = sorted(arn for c in calls if c[0] == 'get_resources'
+                    for arn in c[1]['ResourceARNList'])
+check('the tags are asked by ARN, in the account that owns the interface',
+      'arn:aws:elasticfilesystem:' + pfl.REGION + ':123456789012:file-system/fs-0ef6aa37297b5b3af'
+      in asked_arns, str(asked_arns))
+check('only the proxy on an interface is asked about, not every proxy of the region',
+      not any('prx-0other' in arn for arn in asked_arns), str(asked_arns))
 check('an address nothing owns has no name',
       '10.3.0.99' not in owners, str(owners.get('10.3.0.99')))
 interface_calls = [c for c in calls if c[0] == 'describe_network_interfaces']
@@ -910,13 +959,17 @@ check('only the address the cache lacks is asked for',
 # Without permission to read the tags, a load balancer and a function still have
 # the name their interface carries -- which the generator took from the box.
 denied = _FakeClient(ACCOUNT_PAGES, [], explode=True)
-pfl.elbv2 = pfl.lambda_client = denied
+pfl.elbv2 = pfl.lambda_client = pfl.tagging = denied
 pfl._owner_by_address.clear()
-owners = pfl.owners_for_addresses({'10.3.0.30', '10.3.0.40'})
+owners = pfl.owners_for_addresses({'10.3.0.30', '10.3.0.40', '10.3.0.60', '10.3.0.80'})
 check('a load balancer whose tags cannot be read keeps its own name',
       owners.get('10.3.0.30') == ('front-door', 'load_balancer'), str(owners.get('10.3.0.30')))
 check('and so does a function',
       owners.get('10.3.0.40') == ('process-orders', 'lambda'), str(owners.get('10.3.0.40')))
+check('and so does an RDS proxy',
+      owners.get('10.3.0.80') == ('demo-aurora-rds-proxy', 'rds_proxy'), str(owners.get('10.3.0.80')))
+check('an EFS whose tags cannot be read keeps its kind and no name: its id is not its box',
+      owners.get('10.3.0.60') == ('', 'efs'), str(owners.get('10.3.0.60')))
 
 pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [], explode=True)
 pfl._owner_by_address.clear()
@@ -926,7 +979,7 @@ pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [])
 check('and it is NOT cached as nameless: a transport failure is not an answer',
       pfl.owners_for_addresses({'10.3.0.11'}).get('10.3.0.11') == ('ASG', 'instance'))
 
-pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client = CLIENTS_WERE
+pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging = CLIENTS_WERE
 
 spread = {pfl._expiry() for _ in range(50)}
 check('the timer is jittered, so containers that started together do not all '

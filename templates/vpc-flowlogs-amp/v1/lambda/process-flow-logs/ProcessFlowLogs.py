@@ -191,6 +191,9 @@ ec2 = boto3.client('ec2')
 elbv2 = boto3.client('elbv2')
 rds = boto3.client('rds')
 lambda_client = boto3.client('lambda')
+# The Name tag of every other owner, by ARN, in one call per hundred. See
+# `_tags_by_arn`.
+tagging = boto3.client('resourcegroupstaggingapi')
 
 
 # --- protobuf, by hand ------------------------------------------------------------
@@ -459,6 +462,21 @@ _LOAD_BALANCER = re.compile(r'^ELB (?:(app|net|gwy)/([^/]+)/([0-9a-f]+)|([^\s/]+
 # trailing uuid is what separates it.
 _LAMBDA_ENI = re.compile(
     r'^AWS Lambda VPC ENI-(.+?)(?:-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$')
+# The three below were read off interfaces in a real account (CloudTrail
+# `CreateNetworkInterface` and `DescribeNetworkInterfaces`, 2026-10-13), not
+# taken from documentation.
+# `EFS mount target for fs-<id> (fsmt-<id>)`, on an interface of type `efs`.
+_EFS_MOUNT_TARGET = re.compile(r'^EFS mount target for (fs-[0-9a-f]+)\b')
+# `ElastiCache <cache cluster id>`: one interface per node, and the id is the
+# node's cluster (`wp-object-cache-001`), never its replication group. The Name
+# tag the generator writes on the group is on each of its clusters too.
+_ELASTICACHE_NODE = re.compile(r'^ElastiCache (\S+)$')
+# `Network interface for DBProxy <proxy name>`.
+_DB_PROXY = re.compile(r'^Network interface for DBProxy (\S+)$')
+
+# Owners whose tags are read by ARN through `tag:GetResources`: one permission
+# for every service, instead of one per service.
+_TAGGED_BY_ARN = ('efs', 'elasticache')
 
 
 def _name_tag(tags):
@@ -506,6 +524,19 @@ def owner_of_interface(interface):
         name = function.group(1) if function else ''
         arn = ('arn:aws:lambda:' + REGION + ':' + account + ':function:' + name) if name else None
         return 'lambda', arn, name
+    file_system = _EFS_MOUNT_TARGET.match(description)
+    if file_system:
+        return ('efs', 'arn:aws:elasticfilesystem:' + REGION + ':' + account
+                + ':file-system/' + file_system.group(1), '')
+    cache = _ELASTICACHE_NODE.match(description)
+    if cache:
+        return ('elasticache', 'arn:aws:elasticache:' + REGION + ':' + account
+                + ':cluster:' + cache.group(1), '')
+    proxy = _DB_PROXY.match(description)
+    if proxy:
+        # The proxy's ARN carries an id of its own, not the name, so the name is
+        # what is kept here; `_tags_by_id` looks the ARN up.
+        return 'rds_proxy', proxy.group(1), proxy.group(1)
     if description == 'RDSNetworkInterface':
         # No database id anywhere on the interface; the address is the key, see
         # `_rds_names_by_address`.
@@ -567,6 +598,33 @@ def _tags_by_id(kind, ids):
                 out[arn] = (lambda_client.list_tags(Resource=arn).get('Tags') or {}).get('Name', '')
             except Exception as error:  # noqa: BLE001 -- one function must not cost the others
                 print('list_tags failed for ' + arn + ': ' + str(error))
+    elif kind in _TAGGED_BY_ARN:
+        out.update(_tags_by_arn(ids))
+    elif kind == 'rds_proxy':
+        # Listed, not asked by name: `DBProxyName` takes one name per call, and a
+        # region rarely holds more than a handful of proxies.
+        arn_of = {}
+        for proxy in _paginated(rds, 'describe_db_proxies', 'DBProxies'):
+            if proxy.get('DBProxyName') in ids:
+                arn_of[proxy['DBProxyName']] = proxy['DBProxyArn']
+        tags = _tags_by_arn(arn_of.values())
+        for name, arn in arn_of.items():
+            out[name] = tags.get(arn, '')
+    return out
+
+
+def _tags_by_arn(arns):
+    """`ARN -> Name tag` through `tag:GetResources`, a hundred ARNs per call.
+
+    An ARN the call leaves out has no tags, or no longer exists; either way it
+    has no name here, and the caller caches that like any other answer.
+    """
+    arns = sorted(set(arns))
+    out = {}
+    for start in range(0, len(arns), 100):
+        answer = tagging.get_resources(ResourceARNList=arns[start:start + 100])
+        for mapping in answer.get('ResourceTagMappingList', []):
+            out[mapping.get('ResourceARN')] = _name_tag(mapping.get('Tags'))
     return out
 
 
