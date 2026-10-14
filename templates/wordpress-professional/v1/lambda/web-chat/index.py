@@ -20,7 +20,7 @@ Environment (written by the compile from the connections, and set by the templat
                                     application inference profile of each choice
   PRICE_TABLE                       JSON {key: {"input_per_1k", "output_per_1k"}} in USD.
                                     A choice without a price is refused: no call without a price
-  CHAT_BUDGET_TABLE                 DynamoDB table with the day's spend (partition key pk, string)
+  AWS_DYNAMODB_TABLE_NAME_0         DynamoDB table with the day's spend (partition key pk, string)
   DAILY_BUDGET_USD                  most the chat may spend in a UTC day. Unset: 0, nothing runs
   MAX_OUTPUT_TOKENS                 maxTokens of each model call
   MAX_TOOL_CALLS                    most run_sql calls answering one question
@@ -38,7 +38,7 @@ import boto3
 DB_QUERY_FUNCTION = os.environ.get("AWS_LAMBDA_FUNCTION_NAME_0", "")
 MODELS = json.loads(os.environ.get("MODEL_CHOICES", "[]"))
 PRICES = json.loads(os.environ.get("PRICE_TABLE", "{}"))
-BUDGET_TABLE = os.environ.get("CHAT_BUDGET_TABLE", "")
+BUDGET_TABLE = os.environ.get("AWS_DYNAMODB_TABLE_NAME_0", "")
 DAILY_BUDGET_USD = float(os.environ.get("DAILY_BUDGET_USD", "0"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "1024"))
 MAX_TOOL_CALLS = int(os.environ.get("MAX_TOOL_CALLS", "4"))
