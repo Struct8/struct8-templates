@@ -13,8 +13,8 @@ The URL has no login yet. It is for testing. Every model call is counted against
 DAILY_BUDGET_USD before it is made, so the day's spend cannot pass that value by more than
 one call's worst case.
 
-Environment (set on the function by the template):
-  DB_QUERY_FUNCTION                 name of the db-query function
+Environment (written by the compile from the connections, and set by the template):
+  AWS_LAMBDA_FUNCTION_NAME_0        name of the db-query function (the connection to it has no label)
   MODEL_CHOICES                     JSON list of {"key", "label"}; the key picks the profile
   AWS_BEDROCK_INFERENCE_PROFILE_ARN_<key>
                                     application inference profile of each choice
@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 import boto3
 
-DB_QUERY_FUNCTION = os.environ.get("DB_QUERY_FUNCTION", "")
+DB_QUERY_FUNCTION = os.environ.get("AWS_LAMBDA_FUNCTION_NAME_0", "")
 MODELS = json.loads(os.environ.get("MODEL_CHOICES", "[]"))
 PRICES = json.loads(os.environ.get("PRICE_TABLE", "{}"))
 BUDGET_TABLE = os.environ.get("CHAT_BUDGET_TABLE", "")

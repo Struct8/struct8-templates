@@ -4,11 +4,13 @@ Invoked by web-chat with a payload of {"sql": "..."}; nothing else calls it. It 
 statement on the writer of the cluster through the RDS Data API and answers with the
 columns, the rows and whether the rows were cut.
 
-Environment (set on the function by the template):
-  DB_CLUSTER_ARN  ARN of the Aurora cluster. Only the writer answers the Data API.
-  DB_SECRET_ARN   Secrets Manager secret with the login of a READ-ONLY database user
-  DB_NAME         database the statement runs in
-  MAX_ROWS        most rows answered; one more row is read so the answer can say it was cut
+Environment (written by the compile from the cluster connected to the policy):
+  REGION, ACCOUNT                   the account and region the function runs in
+  AWS_RDS_CLUSTER_NAME_0            name of the Aurora cluster; its ARN is built from it.
+                                    Only the writer answers the Data API
+  AWS_RDS_CLUSTER_SECRET_ARN_0      Secrets Manager secret with the login the Data API uses
+  AWS_RDS_CLUSTER_DB_NAME_0         database the statement runs in
+  MAX_ROWS                          most rows answered; one more row is read so the answer can say it was cut
 
 The statement is checked here: one SELECT, or WITH ... SELECT, with no second statement
 and no word that changes data or the server. The check is a guard. The limit is the
@@ -20,9 +22,11 @@ import re
 
 import boto3
 
-CLUSTER_ARN = os.environ.get("DB_CLUSTER_ARN", "")
-SECRET_ARN = os.environ.get("DB_SECRET_ARN", "")
-DATABASE = os.environ.get("DB_NAME", "")
+CLUSTER_ARN = "arn:aws:rds:{}:{}:cluster:{}".format(
+    os.environ.get("REGION", ""), os.environ.get("ACCOUNT", ""), os.environ.get("AWS_RDS_CLUSTER_NAME_0", "")
+)
+SECRET_ARN = os.environ.get("AWS_RDS_CLUSTER_SECRET_ARN_0", "")
+DATABASE = os.environ.get("AWS_RDS_CLUSTER_DB_NAME_0", "")
 MAX_ROWS = int(os.environ.get("MAX_ROWS", "200"))
 
 MAX_SQL_CHARS = 4000
