@@ -822,7 +822,7 @@ class _FakeClient:
 VPC_PAGE = {'describe_vpcs': [{'Vpcs': [{
     'VpcId': 'vpc-lab', 'Tags': [{'Key': 'Name', 'Value': 'lab-vpc'}],
     'CidrBlockAssociationSet': [{'CidrBlock': '10.3.0.0/16'}]}]}]}
-CLIENTS_WERE = (pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging, pfl.redshift, pfl.dms)
+CLIENTS_WERE = (pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging)
 
 calls = []
 pfl.ec2 = _FakeClient(VPC_PAGE, calls)
@@ -853,8 +853,7 @@ def interface(addresses, **fields):
 # Two instances of one Auto Scaling group, a NAT gateway, a load balancer, a Lambda
 # function, a database, an EFS mount target, an ElastiCache node, an RDS proxy and
 # an address nothing owns any more. The last three descriptions are copied from
-# interfaces of a real account. After them, the managed services whose
-# descriptions come from documentation and published code (10.3.0.90 and up).
+# interfaces of a real account.
 ACCOUNT_PAGES = {
     'describe_network_interfaces': [{'NetworkInterfaces': [
         interface(['10.3.0.11'], Attachment={'InstanceId': 'i-asg1'}),
@@ -871,14 +870,6 @@ ACCOUNT_PAGES = {
                   Description='ElastiCache wp-object-cache-001'),
         interface(['10.3.0.80'], InterfaceType='interface', RequesterId='421361723402',
                   Description='Network interface for DBProxy demo-aurora-rds-proxy'),
-        interface(['10.3.0.90'], RequesterId='amazon-elasticsearch', Description='ES wp-search'),
-        interface(['10.3.0.91'], Description='Amazon EKS apps'),
-        interface(['10.3.0.92'], Description='AWS created network interface for directory d-90672d6b72.'),
-        interface(['10.3.0.93'], Description='[DO NOT DELETE] Amazon MSK network interface for cluster '
-                  + 'arn:aws:kafka:' + pfl.REGION + ':123456789012:cluster/orders-kafka/6357e0b2-0e6a-4b86-a0b4-70df934c2e31-5'),
-        interface(['10.3.0.94'], RequesterId='amazon-redshift', Description='RedshiftNetworkInterface'),
-        interface(['10.3.0.95'], Description='DMSNetworkInterface'),
-        interface(['10.3.0.96'], Description='RDSNetworkInterface'),
     ]}],
     'describe_instances': [{'Reservations': [{'Instances': [
         {'InstanceId': 'i-asg1', 'Tags': [{'Key': 'Name', 'Value': 'ASG'}]},
@@ -888,18 +879,7 @@ ACCOUNT_PAGES = {
         {'NatGatewayId': 'nat-0a1b2c3d4e5f60718', 'Tags': [{'Key': 'Name', 'Value': 'NAT'}]}]}],
     'describe_db_instances': [{'DBInstances': [
         {'DBInstanceIdentifier': 'orders-db', 'Endpoint': {'Address': '10.3.0.50'},
-         'TagList': [{'Key': 'Name', 'Value': 'OrdersDb'}]},
-        # A DocumentDB instance, which the same describe lists, with no Name tag.
-        {'DBInstanceIdentifier': 'catalog-docs-1', 'Engine': 'docdb',
-         'Endpoint': {'Address': '10.3.0.96'}, 'TagList': []}]}],
-    'describe_clusters': [{'Clusters': [
-        {'ClusterIdentifier': 'warehouse', 'Tags': [{'Key': 'Name', 'Value': 'Warehouse'}],
-         'ClusterNodes': [{'NodeRole': 'LEADER', 'PrivateIPAddress': '10.3.0.94'},
-                          {'NodeRole': 'COMPUTE-0', 'PrivateIPAddress': '10.3.0.98'}]}]}],
-    'describe_replication_instances': [{'ReplicationInstances': [
-        {'ReplicationInstanceIdentifier': 'dms-replicator',
-         'ReplicationInstanceArn': 'arn:aws:dms:' + pfl.REGION + ':123456789012:rep:ABCDEFGHIJ',
-         'ReplicationInstancePrivateIpAddresses': ['10.3.0.95']}]}],
+         'TagList': [{'Key': 'Name', 'Value': 'OrdersDb'}]}]}],
     'describe_tags': {'TagDescriptions': [{
         'ResourceArn': 'arn:aws:elasticloadbalancing:' + pfl.REGION
                        + ':123456789012:loadbalancer/app/front-door/50dc6c495c0c9188',
@@ -920,24 +900,16 @@ ACCOUNT_PAGES = {
          'Tags': [{'Key': 'Name', 'Value': 'AuroraProxy'}]},
         {'ResourceARN': 'arn:aws:rds:' + pfl.REGION + ':123456789012:db-proxy:prx-0other',
          'Tags': [{'Key': 'Name', 'Value': 'OtherProxy'}]},
-        {'ResourceARN': 'arn:aws:es:' + pfl.REGION + ':123456789012:domain/wp-search',
-         'Tags': [{'Key': 'Name', 'Value': 'WpSearch'}]},
-        {'ResourceARN': 'arn:aws:ds:' + pfl.REGION + ':123456789012:directory/d-90672d6b72',
-         'Tags': [{'Key': 'Name', 'Value': 'CorpDirectory'}]},
-        {'ResourceARN': 'arn:aws:kafka:' + pfl.REGION + ':123456789012:cluster/orders-kafka/6357e0b2-0e6a-4b86-a0b4-70df934c2e31-5',
-         'Tags': [{'Key': 'Name', 'Value': 'OrdersKafka'}]},
     ],
 }
 EVERY = {'10.3.0.11', '10.3.0.12', '10.3.0.20', '10.3.0.30', '10.3.0.40', '10.3.0.50',
-         '10.3.0.60', '10.3.0.70', '10.3.0.80', '10.3.0.90', '10.3.0.91', '10.3.0.92',
-         '10.3.0.93', '10.3.0.94', '10.3.0.95', '10.3.0.96', '10.3.0.99'}
+         '10.3.0.60', '10.3.0.70', '10.3.0.80', '10.3.0.99'}
 
 calls = []
 fake = _FakeClient(ACCOUNT_PAGES, calls)
 pfl.ec2 = pfl.elbv2 = pfl.rds = pfl.lambda_client = pfl.tagging = fake
-pfl.redshift = pfl.dms = fake
 pfl._owner_by_address.clear()
-pfl._address_cache.clear()
+pfl._rds_cache['expires_at'] = 0.0
 owners = pfl.owners_for_addresses(EVERY)
 check('every instance of a group is named after the group, whatever its id',
       owners.get('10.3.0.11') == owners.get('10.3.0.12') == ('ASG', 'instance'), str(owners))
@@ -962,20 +934,6 @@ check('the tags are asked by ARN, in the account that owns the interface',
       in asked_arns, str(asked_arns))
 check('only the proxy on an interface is asked about, not every proxy of the region',
       not any('prx-0other' in arn for arn in asked_arns), str(asked_arns))
-check('an OpenSearch domain by its tag, the domain name read off its description',
-      owners.get('10.3.0.90') == ('WpSearch', 'opensearch'), str(owners.get('10.3.0.90')))
-check('an EKS control plane by its cluster name, when the cluster has no Name tag',
-      owners.get('10.3.0.91') == ('apps', 'eks_cluster'), str(owners.get('10.3.0.91')))
-check('a directory by its tag, the final period of the description left out',
-      owners.get('10.3.0.92') == ('CorpDirectory', 'directory'), str(owners.get('10.3.0.92')))
-check('an MSK broker by its cluster\'s tag, the ARN found inside the description',
-      owners.get('10.3.0.93') == ('OrdersKafka', 'msk'), str(owners.get('10.3.0.93')))
-check('a Redshift node by its cluster\'s tag, through the address the cluster lists',
-      owners.get('10.3.0.94') == ('Warehouse', 'redshift'), str(owners.get('10.3.0.94')))
-check('a DMS replication instance by its identifier, when it has no Name tag',
-      owners.get('10.3.0.95') == ('dms-replicator', 'dms'), str(owners.get('10.3.0.95')))
-check('a DocumentDB instance through the RDS describe, by its identifier',
-      owners.get('10.3.0.96') == ('catalog-docs-1', 'rds'), str(owners.get('10.3.0.96')))
 check('an address nothing owns has no name',
       '10.3.0.99' not in owners, str(owners.get('10.3.0.99')))
 interface_calls = [c for c in calls if c[0] == 'describe_network_interfaces']
@@ -993,25 +951,6 @@ before = len(calls)
 pfl.owners_for_addresses(EVERY)
 check('asking again inside the timer costs nothing', len(calls) == before, str(len(calls) - before))
 
-# A kind found by address is listed only when an interface of that kind shows up.
-# The fake answers every interface of its page whatever is asked, so the page
-# holds the database's alone.
-only_rds = []
-ONE_DATABASE = dict(ACCOUNT_PAGES, describe_network_interfaces=[{'NetworkInterfaces': [
-    interface(['10.3.0.50'], Description='RDSNetworkInterface')]}])
-pfl.ec2 = pfl.rds = pfl.redshift = pfl.dms = pfl.tagging = _FakeClient(ONE_DATABASE, only_rds)
-pfl._owner_by_address.clear()
-pfl._address_cache.clear()
-pfl.owners_for_addresses({'10.3.0.50'})
-listed = sorted({c[0] for c in only_rds} - {'describe_network_interfaces'})
-check('a database alone lists the databases, not the clusters or the replication instances',
-      listed == ['describe_db_instances'], str(listed))
-pfl.ec2 = pfl.rds = pfl.redshift = pfl.dms = pfl.tagging = fake
-pfl._owner_by_address.clear()
-pfl._address_cache.clear()
-pfl.owners_for_addresses(EVERY)
-before = len(calls)
-
 pfl.owners_for_addresses(EVERY | {'10.3.0.13'})
 asked = [c for c in calls[before:] if c[0] == 'describe_network_interfaces']
 check('only the address the cache lacks is asked for',
@@ -1022,8 +961,7 @@ check('only the address the cache lacks is asked for',
 denied = _FakeClient(ACCOUNT_PAGES, [], explode=True)
 pfl.elbv2 = pfl.lambda_client = pfl.tagging = denied
 pfl._owner_by_address.clear()
-owners = pfl.owners_for_addresses({'10.3.0.30', '10.3.0.40', '10.3.0.60', '10.3.0.80',
-                                   '10.3.0.90', '10.3.0.92', '10.3.0.93'})
+owners = pfl.owners_for_addresses({'10.3.0.30', '10.3.0.40', '10.3.0.60', '10.3.0.80'})
 check('a load balancer whose tags cannot be read keeps its own name',
       owners.get('10.3.0.30') == ('front-door', 'load_balancer'), str(owners.get('10.3.0.30')))
 check('and so does a function',
@@ -1032,12 +970,6 @@ check('and so does an RDS proxy',
       owners.get('10.3.0.80') == ('demo-aurora-rds-proxy', 'rds_proxy'), str(owners.get('10.3.0.80')))
 check('an EFS whose tags cannot be read keeps its kind and no name: its id is not its box',
       owners.get('10.3.0.60') == ('', 'efs'), str(owners.get('10.3.0.60')))
-check('an OpenSearch domain keeps its own name',
-      owners.get('10.3.0.90') == ('wp-search', 'opensearch'), str(owners.get('10.3.0.90')))
-check('and so does an MSK cluster, the name read out of its ARN',
-      owners.get('10.3.0.93') == ('orders-kafka', 'msk'), str(owners.get('10.3.0.93')))
-check('a directory keeps its kind and no name: its id is not its box',
-      owners.get('10.3.0.92') == ('', 'directory'), str(owners.get('10.3.0.92')))
 
 pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [], explode=True)
 pfl._owner_by_address.clear()
@@ -1047,7 +979,7 @@ pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [])
 check('and it is NOT cached as nameless: a transport failure is not an answer',
       pfl.owners_for_addresses({'10.3.0.11'}).get('10.3.0.11') == ('ASG', 'instance'))
 
-pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging, pfl.redshift, pfl.dms = CLIENTS_WERE
+pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging = CLIENTS_WERE
 
 spread = {pfl._expiry() for _ in range(50)}
 check('the timer is jittered, so containers that started together do not all '
