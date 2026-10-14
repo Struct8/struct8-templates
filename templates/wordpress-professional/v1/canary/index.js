@@ -1,7 +1,7 @@
 // Read-only check of the WordPress site, run by a CloudWatch Synthetics canary.
-// Loads each page once, with a real browser, and fails the run if a page does not answer 200.
-// Nothing is submitted: no form, no login, no order.
-const { chromium } = require('playwright-core');
+// Loads each page once, with the browser the canary runtime provides, and fails the run
+// if a page does not answer 200. Nothing is submitted: no form, no login, no order.
+const { synthetics } = require('@aws/synthetics-playwright');
 
 const PAGES = ['/', '/shop/', '/cart/'];
 
@@ -11,9 +11,9 @@ exports.handler = async () => {
     throw new Error('TARGET_URL is not set');
   }
 
-  const browser = await chromium.launch({ args: ['--no-sandbox'] });
   try {
-    const page = await browser.newPage({ userAgent: 'CloudMan-Canary/1.0' });
+    const browser = await synthetics.launch();
+    const page = await synthetics.newPage(browser);
     const failures = [];
 
     for (const path of PAGES) {
@@ -33,6 +33,6 @@ exports.handler = async () => {
     }
     return 'ok';
   } finally {
-    await browser.close();
+    await synthetics.close();
   }
 };
