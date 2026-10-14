@@ -37,8 +37,16 @@ RESULT_TTL_SECONDS = 60
 PERIODS = {"1h": (3600, 300), "24h": (86400, 3600), "7d": (7 * 86400, 86400)}
 DEFAULT_PERIOD = "24h"
 
+# ?view=csp shows the CSP violation counters of the csp-receiver instead
+VIEWS = ("analytics", "csp")
+DEFAULT_VIEW = "analytics"
+# days of counters each period reads: the receiver keeps one counter per UTC day
+CSP_DAYS = {"1h": 1, "24h": 2, "7d": 7}
+CSP_TABLE_NAME = os.environ.get("AWS_DYNAMODB_TABLE_NAME_0", "")
+
 athena = boto3.client("athena")
 _cache = {}
+_csp_table = None
 
 TEXT = {
     "en": {
@@ -442,23 +450,166 @@ th{color:var(--muted);font-weight:500;font-size:13px}td.n,th:last-child{text-ali
 """
 
 
-def page(period, lang, key, body):
+def page(period, lang, key, body, view=DEFAULT_VIEW):
     text = TEXT[lang]
+    labels = CSP_TEXT[lang]
+
+    def link(fields, active, label):
+        if key:
+            fields = {"key": key, **fields}
+        cls = " class=on" if active else ""
+        return f'<a href="?{esc(urlencode(fields))}"{cls}>{esc(label)}</a>'
+
+    tabs = [
+        link({"range": period, "lang": lang}, view == DEFAULT_VIEW, labels["analytics_tab"]),
+        link({"view": "csp", "range": period, "lang": lang}, view == "csp", labels["csp_tab"]),
+    ]
     links = []
     for name in PERIODS:
         fields = {"range": name, "lang": lang}
-        if key:
-            fields = {"key": key, **fields}
-        query = urlencode(fields)
-        links.append(f'<a href="?{esc(query)}"{" class=on" if name == period else ""}>{esc(text["period"][name])}</a>')
+        if view != DEFAULT_VIEW:
+            fields = {"view": view, **fields}
+        links.append(link(fields, name == period, text["period"][name]))
     return (
         f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         '<meta name="robots" content="noindex">'
         f'<title>{esc(text["title"])}</title><style>{STYLE}</style></head><body><main>'
-        f'<header><div><h1>{esc(text["title"])}</h1><p>{esc(text["subtitle"])}</p></div><nav>{"".join(links)}</nav></header>'
+        f'<header><div><h1>{esc(text["title"])}</h1><p>{esc(text["subtitle"])}</p></div>'
+        f'<div><nav>{"".join(tabs)}</nav><nav>{"".join(links)}</nav></div></header>'
         f"{body}</main></body></html>"
     )
+
+
+# ----------------------------------------------------------------- CSP reports
+
+CSP_TEXT = {
+    "en": {
+        "analytics_tab": "Analytics",
+        "csp_tab": "CSP reports",
+        "csp_reports": "Reports",
+        "csp_directives": "Directives",
+        "csp_pages": "Pages",
+        "csp_by_directive": "Reports by directive",
+        "csp_by_directive_note": "Each directive is one rule of the Content-Security-Policy that a browser checked.",
+        "csp_detail": "Reports by page",
+        "csp_detail_note": "The counters are kept per UTC day, so the period shows whole days. Most reports first.",
+        "csp_failed": "Could not read the CSP table",
+        "day": "Day",
+        "directive": "Directive",
+        "blocked": "Blocked",
+        "page": "Page",
+        "count": "Reports",
+        "last_seen": "Last report",
+    },
+    "pt": {
+        "analytics_tab": "Analytics",
+        "csp_tab": "Relatórios CSP",
+        "csp_reports": "Relatórios",
+        "csp_directives": "Diretivas",
+        "csp_pages": "Páginas",
+        "csp_by_directive": "Relatórios por diretiva",
+        "csp_by_directive_note": "Cada diretiva é uma regra da Content-Security-Policy que o navegador verificou.",
+        "csp_detail": "Relatórios por página",
+        "csp_detail_note": "Os contadores são guardados por dia UTC, então o período mostra dias inteiros. Os mais frequentes primeiro.",
+        "csp_failed": "Não foi possível ler a tabela de CSP",
+        "day": "Dia",
+        "directive": "Diretiva",
+        "blocked": "Bloqueado",
+        "page": "Página",
+        "count": "Relatórios",
+        "last_seen": "Último relatório",
+    },
+}
+
+
+def csp_table():
+    global _csp_table
+    if _csp_table is None:
+        _csp_table = boto3.resource("dynamodb").Table(CSP_TABLE_NAME)
+    return _csp_table
+
+
+def csp_counters(days, now):
+    """The counters of the given days that have not expired.
+
+    The table is keyed by day and directive, and nothing in it indexes the expiry, so
+    the whole table is read and filtered here. It stays small: each counter expires
+    30 days after its last report.
+    """
+    wanted = set(days)
+    counters = []
+    kwargs = {}
+    while True:
+        page_ = csp_table().scan(**kwargs)
+        for item in page_.get("Items", []):
+            day = item["pk"].split("#", 1)[0]
+            if day in wanted and int(item.get("expires_at", 0)) > now:
+                counters.append(item)
+        if "LastEvaluatedKey" not in page_:
+            return counters
+        kwargs["ExclusiveStartKey"] = page_["LastEvaluatedKey"]
+
+
+def csp_rows(counters):
+    """One row per day, directive, blocked address and page, most reports first."""
+    rows = []
+    for item in counters:
+        day, directive = item["pk"].split("#", 1)
+        blocked, page_path = item["sk"].rsplit("#", 1)
+        last_seen = datetime.fromtimestamp(int(item["last_seen"]), timezone.utc)
+        rows.append(
+            {
+                "day": day,
+                "directive": directive,
+                "blocked": blocked or "-",
+                "page": page_path or "/",
+                "count": int(item["count"]),
+                "last_seen": last_seen.strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+    rows.sort(key=lambda r: (-r["count"], r["day"], r["directive"], r["blocked"], r["page"]))
+    return rows
+
+
+def render_csp(period, lang, key, now):
+    text = TEXT[lang]
+    labels = CSP_TEXT[lang]
+    try:
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        days = [(today - timedelta(days=n)).isoformat() for n in range(CSP_DAYS[period])]
+        rows = csp_rows(csp_counters(days, now))
+    except Exception as error:  # the page answers with the error, it does not fail
+        body = f'<section><h2>{esc(labels["csp_failed"])}</h2><p class="empty">{esc(error)}</p></section>'
+        return page(period, lang, key, body, view="csp")
+
+    totals = {}
+    for row in rows:
+        totals[row["directive"]] = totals.get(row["directive"], 0) + row["count"]
+    by_directive = [{"directive": d, "count": c} for d, c in sorted(totals.items(), key=lambda kv: -kv[1])]
+    reports = sum(row["count"] for row in rows)
+    columns = [
+        ("day", labels["day"], False),
+        ("directive", labels["directive"], False),
+        ("blocked", labels["blocked"], False),
+        ("page", labels["page"], False),
+        ("count", labels["count"], True),
+        ("last_seen", labels["last_seen"], False),
+    ]
+    body = "".join(
+        [
+            '<div class="cards">',
+            card(labels["csp_reports"], number(reports, lang)),
+            card(labels["csp_directives"], number(len(totals), lang)),
+            card(labels["csp_pages"], number(len({row["page"] for row in rows}), lang)),
+            "</div>",
+            '<div class="grid">',
+            panel(labels["csp_by_directive"], bars(by_directive, "directive", "count", lang, text), labels["csp_by_directive_note"]),
+            "</div>",
+            panel(labels["csp_detail"], table(rows[:100], columns, lang, text), labels["csp_detail_note"]),
+        ]
+    )
+    return page(period, lang, key, body, view="csp")
 
 
 # --------------------------------------------------------------------------- handler
@@ -495,6 +646,12 @@ def handler(event, context):
     if period not in PERIODS:
         period = DEFAULT_PERIOD
 
+    view = params.get("view", DEFAULT_VIEW)
+    if view not in VIEWS:
+        view = DEFAULT_VIEW
+
     now = int(time.time())
+    if view == "csp":
+        return reply(200, render_csp(period, lang, given, now), cache="private, max-age=60")
     results = read_all(period, now)
     return reply(200, render(period, lang, given, now, results), cache="private, max-age=60")
