@@ -3,11 +3,17 @@
 Served through a Lambda Function URL (payload format 2.0). It answers three routes:
   GET  /           the page, with two tabs: SQL, and Chat
   POST /api/query  runs one read-only statement (through the db-query function)
-  POST /api/chat   one question. The model answers, and calls run_sql for the data it needs
+  POST /api/chat   one question. The model answers, and calls run_sql for the data it needs.
+                   The answer comes with the queries that actually ran, which the page shows
+                   apart from the model's text
 
 The chat keeps no state here: the browser sends the conversation each time, and the last
 MAX_HISTORY_TURNS turns go to the model. Only the text of each turn is kept in the browser;
 the tool calls of one question are not sent back on the next.
+
+The first model call of each question is made with toolChoice "any", so the model has to
+query the database before it answers. A model that refuses toolChoice is remembered and
+called without it. Each model call and each query is written to the log as one JSON line.
 
 The URL has no login yet. It is for testing. Every model call is counted against
 DAILY_BUDGET_USD before it is made, so the day's spend cannot pass that value by more than
@@ -37,6 +43,7 @@ import os
 from datetime import datetime, timezone
 
 import boto3
+from botocore.exceptions import ClientError
 
 DB_QUERY_FUNCTION = os.environ.get("AWS_LAMBDA_FUNCTION_NAME_0", "")
 PROFILE_PREFIX = "AWS_BEDROCK_INFERENCE_PROFILE_ARN_"
@@ -52,6 +59,10 @@ MAX_MESSAGE_CHARS = 4000
 # System prompt and tool definition, counted in the estimate before each call.
 # Sized for SYSTEM as it is now (the WooCommerce map is most of it); raise it if SYSTEM grows.
 OVERHEAD_TOKENS = 1500
+# Temperature 0: the answers report data, and any variation is a chance to invent.
+INFERENCE = {"maxTokens": MAX_OUTPUT_TOKENS, "temperature": 0}
+# Keys of the models that refused toolChoice in this container, so they are not asked again.
+NO_TOOL_CHOICE = set()
 
 lambda_client = boto3.client("lambda")
 bedrock = boto3.client("bedrock-runtime")
@@ -156,6 +167,11 @@ PAGE = """<!doctype html>
   .msg.user { align-self: flex-end; background: var(--line); max-width: 85%; }
   .msg.error { color: var(--bad); }
   .muted { color: var(--muted); font-size: 13px; }
+  .queries { font-size: 13px; color: var(--muted); margin-top: -4px; }
+  .queries summary { cursor: pointer; }
+  .queries summary.none { color: var(--bad); }
+  .queries pre { white-space: pre-wrap; margin: 6px 0 2px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font: 12px ui-monospace, monospace; color: var(--fg); }
+  .queries p { margin: 0 0 6px; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -270,6 +286,32 @@ function addMessage(role, text) {
   div.scrollIntoView({ block: "end" });
 }
 
+// The queries that ran for an answer, as the server saw them: not the SQL the model wrote in its text.
+function addQueries(queries) {
+  const box = document.createElement("details");
+  box.className = "queries";
+  const summary = document.createElement("summary");
+  if (queries.length) {
+    summary.textContent = "Consultas executadas: " + queries.length;
+  } else {
+    summary.textContent = "Nenhuma consulta foi executada para esta resposta.";
+    summary.className = "none";
+  }
+  box.append(summary);
+  queries.forEach((q) => {
+    const pre = document.createElement("pre");
+    pre.textContent = q.sql;
+    box.append(pre);
+    if (q.error) {
+      note(box, "Erro: " + q.error, "error");
+    } else {
+      note(box, q.rows + (q.rows === 1 ? " linha" : " linhas") + (q.truncated ? ", cortado" : ""));
+    }
+  });
+  $("log").append(box);
+  box.scrollIntoView({ block: "end" });
+}
+
 $("chat-send").onclick = async () => {
   const text = $("chat-text").value.trim();
   if (!text) return;
@@ -284,6 +326,7 @@ $("chat-send").onclick = async () => {
       history.pop();
     } else {
       addMessage("assistant", result.answer);
+      addQueries(result.queries || []);
       history.push({ role: "assistant", text: result.answer });
     }
   } catch (e) {
@@ -408,6 +451,34 @@ def model_choices():
     return choices
 
 
+def log(event, **fields):
+    """One JSON line in the function's log group."""
+    print(json.dumps({"event": event, **fields}, ensure_ascii=False, default=str))
+
+
+def converse(profile_arn, key, messages, force_tool):
+    """One model call. With force_tool, the model must call run_sql, on the models that accept toolChoice."""
+    config = TOOL_CONFIG
+    if force_tool and key not in NO_TOOL_CHOICE:
+        config = dict(TOOL_CONFIG, toolChoice={"any": {}})
+    try:
+        return bedrock.converse(
+            modelId=profile_arn,
+            system=[{"text": SYSTEM}],
+            messages=messages,
+            toolConfig=config,
+            inferenceConfig=INFERENCE,
+        )
+    except ClientError as error:
+        if config is TOOL_CONFIG or "toolChoice" not in str(error):
+            raise
+        # The model refused toolChoice. The refusal is a validation error, so nothing was spent;
+        # the same call goes again without it.
+        NO_TOOL_CHOICE.add(key)
+        log("tool_choice_refused", model=key, error=str(error))
+        return converse(profile_arn, key, messages, False)
+
+
 def chat(body):
     key = str(body.get("model", ""))
     profile_arn = os.environ.get(PROFILE_PREFIX + key, "") if key else ""
@@ -422,42 +493,57 @@ def chat(body):
         return {"error": "Envie uma pergunta."}
 
     calls = 0
+    # The queries that ran, for the page: the model's text may show SQL that never ran.
+    executed = []
     # One model call per round: the answer, then one round per batch of run_sql calls.
-    for _ in range(MAX_TOOL_CALLS + 1):
+    for round_number in range(MAX_TOOL_CALLS + 1):
         estimate_in = len(json.dumps(messages, ensure_ascii=False)) // 3 + OVERHEAD_TOKENS
         worst = cost(estimate_in, MAX_OUTPUT_TOKENS, price)
         if not reserve(worst):
             return {"error": "O orçamento diário foi atingido. Tente de novo amanhã."}
         try:
-            response = bedrock.converse(
-                modelId=profile_arn,
-                system=[{"text": SYSTEM}],
-                messages=messages,
-                toolConfig=TOOL_CONFIG,
-                inferenceConfig={"maxTokens": MAX_OUTPUT_TOKENS},
-            )
+            response = converse(profile_arn, key, messages, force_tool=round_number == 0)
         except Exception:
             adjust(-worst)
             raise
         usage = response.get("usage", {})
-        adjust(cost(usage.get("inputTokens", 0), usage.get("outputTokens", 0), price) - worst)
+        spent = cost(usage.get("inputTokens", 0), usage.get("outputTokens", 0), price)
+        adjust(spent - worst)
+        log(
+            "model_call",
+            model=key,
+            round=round_number,
+            stop_reason=response.get("stopReason"),
+            input_tokens=usage.get("inputTokens", 0),
+            output_tokens=usage.get("outputTokens", 0),
+            cost_usd=round(spent, 6),
+        )
 
         message = response["output"]["message"]
         messages.append(message)
         text = "".join(block.get("text", "") for block in message["content"])
         if response.get("stopReason") != "tool_use":
-            return {"answer": text or "(sem resposta)"}
+            return {"answer": text or "(sem resposta)", "queries": executed}
 
         results = []
         for block in message["content"]:
             if "toolUse" not in block:
                 continue
             tool = block["toolUse"]
+            sql = str(tool.get("input", {}).get("sql", ""))
             calls += 1
             if calls > MAX_TOOL_CALLS:
                 outcome = {"error": "Limite de consultas nesta pergunta."}
             else:
-                outcome = run_sql(str(tool.get("input", {}).get("sql", "")))
+                outcome = run_sql(sql)
+            ran = {
+                "sql": sql,
+                "rows": len(outcome.get("rows", [])),
+                "truncated": bool(outcome.get("truncated")),
+                "error": outcome.get("error"),
+            }
+            executed.append(ran)
+            log("query", model=key, **ran)
             results.append(
                 {
                     "toolResult": {
@@ -468,10 +554,10 @@ def chat(body):
                 }
             )
         if not results:
-            return {"answer": text or "(sem resposta)"}
+            return {"answer": text or "(sem resposta)", "queries": executed}
         messages.append({"role": "user", "content": results})
 
-    return {"answer": "Limite de consultas atingido nesta pergunta. A resposta ficou incompleta."}
+    return {"answer": "Limite de consultas atingido nesta pergunta. A resposta ficou incompleta.", "queries": executed}
 
 
 # --------------------------------------------------------------------------- handler
