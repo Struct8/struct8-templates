@@ -51,7 +51,7 @@ MODEL_ROWS = int(os.environ.get("MODEL_ROWS", "50"))
 MAX_MESSAGE_CHARS = 4000
 # System prompt and tool definition, counted in the estimate before each call.
 # Sized for SYSTEM as it is now (the WooCommerce map is most of it); raise it if SYSTEM grows.
-OVERHEAD_TOKENS = 1000
+OVERHEAD_TOKENS = 1200
 
 lambda_client = boto3.client("lambda")
 bedrock = boto3.client("bedrock-runtime")
@@ -73,7 +73,12 @@ SYSTEM = (
     "Os pedidos não estão em wp_posts, porque a sincronização com wp_posts está desligada. "
     "Status: vêm com prefixo wc-. As vendas pagas são wc-completed e wc-processing, salvo se a pergunta pedir outro critério. "
     "Itens vendidos: wp_wc_order_product_lookup (order_id, product_id, product_qty, product_net_revenue, date_created). "
-    "A quantidade vendida é SUM(product_qty). "
+    "A quantidade vendida é SUM(product_qty). Produtos diferentes são COUNT(DISTINCT product_id). "
+    "Se a pergunta for ambígua entre as duas, responda com as duas medidas e diga qual é qual. "
+    "Preço: o valor da linha é _line_total na itemmeta, e o preço unitário é _line_total / _qty. "
+    "No lookup, o equivalente é product_net_revenue / product_qty. "
+    "Antes de dizer que um valor não existe, consulte a outra fonte. "
+    "Se uma resposta anterior desta conversa trouxe outro número, reconcilie os dois antes de responder. "
     "Itens de um pedido: wp_woocommerce_order_items (order_item_id, order_item_name, order_id). "
     "A itemmeta tem _product_id, _qty e _line_total; não existe a chave _name. "
     "Nome do produto: wp_posts com post_type = 'product' e post_title, ligado pelo _product_id. "
