@@ -38,6 +38,7 @@ from collections import defaultdict
 import boto3
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
+from botocore.exceptions import ParamValidationError
 
 # --- configuration ---------------------------------------------------------------
 #
@@ -447,6 +448,11 @@ def _expiry():
 # of a whole batch.
 ADDRESS_CHUNK = 100
 
+# The longest value of an `_sg` label that is written. Prometheus refuses a label
+# value past its limit for the WHOLE request, so one interface with many long
+# security group names must cost its own label, not every series of the batch.
+SG_LABEL_LIMIT = 1000
+
 # What an end is called when nothing it belongs to carries a Name tag. One value
 # per VPC (the `_vpc` label keeps them apart), so the volume still adds up in the
 # totals while landing on no box.
@@ -661,14 +667,27 @@ def _describe_interfaces(chunk):
     v6 = [a for a in chunk if ':' in a]
     interfaces = []
     if v4:
-        interfaces += list(_paginated(
-            ec2, 'describe_network_interfaces', 'NetworkInterfaces',
-            Filters=[{'Name': 'addresses.private-ip-address', 'Values': v4}]))
+        interfaces += _interfaces_where('addresses.private-ip-address', v4)
     if v6:
-        interfaces += list(_paginated(
-            ec2, 'describe_network_interfaces', 'NetworkInterfaces',
-            Filters=[{'Name': 'ipv6-addresses.ipv6-address', 'Values': v6}]))
+        interfaces += _interfaces_where('ipv6-addresses.ipv6-address', v6)
     return interfaces
+
+
+def _interfaces_where(filter_name, values):
+    """The interfaces that match one filter, the ones AWS manages for a service included.
+
+    `IncludeManagedResources` is what keeps an interface a service owns from being
+    left out of the answer where the account hides managed resources. A boto3 older
+    than the parameter refuses it as a whole, which would cost every name of the
+    batch, so that refusal alone is asked again without it.
+    """
+    filters = [{'Name': filter_name, 'Values': values}]
+    try:
+        return list(_paginated(ec2, 'describe_network_interfaces', 'NetworkInterfaces',
+                               Filters=filters, IncludeManagedResources=True))
+    except ParamValidationError:
+        return list(_paginated(ec2, 'describe_network_interfaces', 'NetworkInterfaces',
+                               Filters=filters))
 
 
 def _addresses_of(interface):
@@ -718,13 +737,16 @@ def owners_for_addresses(addresses):
                   + ' addresses: ' + str(error))
             continue
 
-        owned = {}  # address -> (kind, owner id, fallback name, the interface's own Name tag)
+        # address -> (kind, owner id, fallback name, the interface's own Name tag,
+        # the names of its security groups)
+        owned = {}
         wanted = defaultdict(set)
         for interface in interfaces:
             kind, owner_id, fallback = owner_of_interface(interface)
             own_tag = _name_tag(interface.get('TagSet'))
+            groups = _group_names(interface)
             for address in _addresses_of(interface):
-                owned[address] = (kind, owner_id, fallback, own_tag)
+                owned[address] = (kind, owner_id, fallback, own_tag, groups)
             if owner_id:
                 wanted[kind].add(owner_id)
 
@@ -745,13 +767,44 @@ def owners_for_addresses(addresses):
                 print('describe_db_instances failed: ' + str(error))
 
         for address in chunk:
-            kind, owner_id, fallback, own_tag = owned.get(address, ('', None, '', ''))
+            kind, owner_id, fallback, own_tag, groups = owned.get(
+                address, ('', None, '', '', ''))
             name = ((tags.get(owner_id, '') if owner_id else '')
                     or databases.get(address, '') or fallback or own_tag)
-            _owner_by_address[address] = {'name': name, 'kind': kind, 'expires_at': _expiry()}
+            _owner_by_address[address] = {
+                'name': name, 'kind': kind, 'groups': groups, 'expires_at': _expiry()}
 
     return {address: (entry['name'], entry['kind'])
             for address, entry in _owner_by_address.items() if entry['name'] or entry['kind']}
+
+
+def _group_names(interface):
+    """The names of the security groups of an interface, sorted and joined by `|`.
+
+    WHY THE GROUPS: they are the one thing every interface of every service
+    carries, and the answer to the call that finds the interface already has
+    them. The generator names the group it embeds in a resource after that
+    resource, so the diagram can say whose interface it is without this code
+    knowing the service -- no description to recognise, no tag to read, no
+    permission to add. `|` is not a character AWS allows in a group name.
+
+    '' when there is none, or when the value would pass `SG_LABEL_LIMIT`.
+    """
+    names = sorted({group.get('GroupName') for group in interface.get('Groups') or []
+                    if group.get('GroupName')})
+    joined = '|'.join(names)
+    return joined if len(joined) <= SG_LABEL_LIMIT else ''
+
+
+def groups_for_addresses(addresses):
+    """`address -> security group names` of the interface that holds it.
+
+    Read from what `owners_for_addresses` just cached, so it costs no call. Only
+    the addresses with a group are in the answer.
+    """
+    return {address: _owner_by_address[address]['groups']
+            for address in addresses
+            if _owner_by_address.get(address, {}).get('groups')}
 
 
 def vpc_label(vpc_id):
@@ -894,7 +947,7 @@ def capturing_side(record):
     return 'dst' if value_of(record, 'flow-direction') == 'ingress' else 'src'
 
 
-def name_endpoint(record, side, cidrs, owners=None, hop=False):
+def name_endpoint(record, side, cidrs, owners=None, hop=False, groups=None):
     """Returns the labels for one end: its name, the kind of thing it is, and the
     VPC it sits in.
 
@@ -913,6 +966,11 @@ def name_endpoint(record, side, cidrs, owners=None, hop=False):
     Read from the RECORD first where it says more: `ecs-service-name` names a task
     by its service, and `instance-tag`, when the flow log carries it, is the tag
     AWS stamped. Both only describe the interface that CAPTURED the record.
+
+    AN END NOTHING NAMED carries `_sg` too: the security groups of its interface,
+    which the diagram matches against the groups it knows. Only those ends: a
+    named end already lands by its name, and a label it does not need would split
+    its series for nothing. See `_group_names`.
     """
     if hop:
         # THE HOP'S OWN ADDRESSES, and only those: on a hop record the two ends
@@ -938,11 +996,14 @@ def name_endpoint(record, side, cidrs, owners=None, hop=False):
             if not kind:
                 kind = (value_of(record, 'interface-type')
                         or ('instance' if value_of(record, 'instance-id') else ''))
-        return {
+        labels = {
             side + '_name': name or UNNAMED,
             side + '_type': kind or 'unknown',
             side + '_vpc': vpc_label(scope),
         }
+        if not name and (groups or {}).get(address):
+            labels[side + '_sg'] = groups[address]
+        return labels
 
     # Outside every known CIDR the canvas has no box to draw, so the end collapses.
     # Which of the four it collapses to is read from the record, never guessed.
@@ -1054,7 +1115,7 @@ def service_port(record):
 
 # --- aggregation ------------------------------------------------------------------
 
-def accumulate(records, cidrs, diagnostics, owners=None):
+def accumulate(records, cidrs, diagnostics, owners=None, groups=None):
     """(bucket, labels) -> [bytes, packets], keeping only the egress direction."""
     totals = defaultdict(lambda: [0, 0])
 
@@ -1115,8 +1176,8 @@ def accumulate(records, cidrs, diagnostics, owners=None):
         bucket = (start // BUCKET_SECONDS) * BUCKET_SECONDS
 
         labels = {}
-        labels.update(name_endpoint(record, 'src', cidrs, owners, hop))
-        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop))
+        labels.update(name_endpoint(record, 'src', cidrs, owners, hop, groups))
+        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop, groups))
         if hop:
             # DECLARED, not left to be inferred from the shape of the other
             # labels. A hop and a direct conversation between the same two boxes
@@ -1178,7 +1239,7 @@ REFUSED_PORTS_ABOVE_1024 = frozenset({
 })
 
 
-def accumulate_refused(records, cidrs, diagnostics, owners=None):
+def accumulate_refused(records, cidrs, diagnostics, owners=None, groups=None):
     """(bucket, labels) -> [bytes, packets] of what a security group or a network
     ACL refused.
 
@@ -1220,8 +1281,8 @@ def accumulate_refused(records, cidrs, diagnostics, owners=None):
         hop = describes_a_hop(record)
 
         labels = {}
-        labels.update(name_endpoint(record, 'src', cidrs, owners, hop))
-        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop))
+        labels.update(name_endpoint(record, 'src', cidrs, owners, hop, groups))
+        labels.update(name_endpoint(record, 'dst', cidrs, owners, hop, groups))
         if hop:
             labels['hop'] = '1'
 
@@ -1250,12 +1311,13 @@ def group_of(labels):
     """The identity the cut competes on: each end's name and the VPC it is in.
 
     The VPC is part of it only for the ends nothing named: `unnamed` in two VPCs
-    is two different things, while a named end is unique on its own.
+    is two different things, while a named end is unique on its own. So are the
+    security groups: `unnamed` behind two different groups is two different things.
     """
     as_dict = dict(labels)
     return (
-        as_dict.get('src_name', ''), as_dict.get('src_vpc', ''),
-        as_dict.get('dst_name', ''), as_dict.get('dst_vpc', ''),
+        as_dict.get('src_name', ''), as_dict.get('src_vpc', ''), as_dict.get('src_sg', ''),
+        as_dict.get('dst_name', ''), as_dict.get('dst_vpc', ''), as_dict.get('dst_sg', ''),
     )
 
 
@@ -1559,15 +1621,17 @@ def lambda_handler(event, context):
     # Only for the addresses this batch mentions and the cache does not already
     # hold. In the steady state of a warm container that list is empty and EC2 is
     # not called at all.
-    owners = owners_for_addresses(addresses_in(records, cidrs))
+    addresses = addresses_in(records, cidrs)
+    owners = owners_for_addresses(addresses)
+    groups = groups_for_addresses(addresses)
     diagnostics['addresses_named'] = sum(1 for name, _ in owners.values() if name)
     diagnostics['addresses_unnamed'] = sum(1 for name, _ in owners.values() if not name)
 
     count_records_longer_than_bucket(records, diagnostics)
     arrived = newest_end(records)
 
-    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, owners))
-    refused = cut_to_top_n(accumulate_refused(records, cidrs, diagnostics, owners))
+    totals = cut_to_top_n(accumulate(records, cidrs, diagnostics, owners, groups))
+    refused = cut_to_top_n(accumulate_refused(records, cidrs, diagnostics, owners, groups))
     edge_series = (to_series(totals, offset_ms, arrived=arrived)
                    + to_series(refused, offset_ms, REFUSED_METRICS, arrived=arrived))
 

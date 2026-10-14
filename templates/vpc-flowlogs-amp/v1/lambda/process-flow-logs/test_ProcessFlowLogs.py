@@ -35,10 +35,17 @@ class _NoAws:
 sys.modules.setdefault('boto3', type(sys)('boto3'))
 sys.modules['boto3'].client = lambda *a, **k: _NoAws()
 sys.modules['boto3'].Session = lambda *a, **k: _NoAws()
-for name in ('botocore', 'botocore.auth', 'botocore.awsrequest'):
+for name in ('botocore', 'botocore.auth', 'botocore.awsrequest', 'botocore.exceptions'):
     sys.modules.setdefault(name, type(sys)(name))
 sys.modules['botocore.auth'].SigV4Auth = object
 sys.modules['botocore.awsrequest'].AWSRequest = object
+
+
+class ParamValidationError(Exception):
+    """What botocore raises for a parameter its model does not know."""
+
+
+sys.modules['botocore.exceptions'].ParamValidationError = ParamValidationError
 
 spec = importlib.util.spec_from_file_location('process_flow_logs', TARGET)
 pfl = importlib.util.module_from_spec(spec)
@@ -777,23 +784,28 @@ print('\n=== the caches, which is what keeps EC2 out of every invocation ===')
 
 
 class _FakePaginator:
-    def __init__(self, pages, calls, operation):
+    def __init__(self, pages, calls, operation, refuses_managed=False):
         self.pages, self.calls, self.operation = pages, calls, operation
+        self.refuses_managed = refuses_managed
 
     def paginate(self, **kwargs):
         self.calls.append((self.operation, kwargs))
+        if self.refuses_managed and 'IncludeManagedResources' in kwargs:
+            raise ParamValidationError('Unknown parameter in input: "IncludeManagedResources"')
         return self.pages
 
 
 class _FakeClient:
     # Pages per operation, so one fake answers every describe a batch makes.
-    def __init__(self, pages, calls, explode=False):
+    def __init__(self, pages, calls, explode=False, refuses_managed=False):
         self.pages, self.calls, self.explode = pages, calls, explode
+        self.refuses_managed = refuses_managed
 
     def get_paginator(self, operation):
         if self.explode:
             raise RuntimeError('AWS said no')
-        return _FakePaginator(self.pages.get(operation, []), self.calls, operation)
+        return _FakePaginator(self.pages.get(operation, []), self.calls, operation,
+                              self.refuses_managed)
 
     def describe_tags(self, **kwargs):
         self.calls.append(('describe_tags', kwargs))
@@ -856,7 +868,8 @@ def interface(addresses, **fields):
 # interfaces of a real account.
 ACCOUNT_PAGES = {
     'describe_network_interfaces': [{'NetworkInterfaces': [
-        interface(['10.3.0.11'], Attachment={'InstanceId': 'i-asg1'}),
+        interface(['10.3.0.11'], Attachment={'InstanceId': 'i-asg1'},
+                  Groups=[{'GroupId': 'sg-0a', 'GroupName': 'autoscaling_group_ASG_group'}]),
         interface(['10.3.0.12'], Attachment={'InstanceId': 'i-asg2'}),
         interface(['10.3.0.20'], InterfaceType='nat_gateway',
                   Description='Interface for NAT Gateway nat-0a1b2c3d4e5f60718'),
@@ -870,6 +883,17 @@ ACCOUNT_PAGES = {
                   Description='ElastiCache wp-object-cache-001'),
         interface(['10.3.0.80'], InterfaceType='interface', RequesterId='421361723402',
                   Description='Network interface for DBProxy demo-aurora-rds-proxy'),
+        # A service nothing in this file recognises, behind two groups: the one
+        # the generator embedded in it and one drawn by hand.
+        interface(['10.3.0.97'], InterfaceType='interface', RequesterId='amazon-new-service',
+                  Description='Something a service made',
+                  Groups=[{'GroupId': 'sg-0c', 'GroupName': 'shared-by-hand'},
+                          {'GroupId': 'sg-0b', 'GroupName': 'new_service_search_group'}]),
+        # The same, with groups too long to travel as a label.
+        interface(['10.3.0.98'], InterfaceType='interface', RequesterId='amazon-new-service',
+                  Description='Something a service made',
+                  Groups=[{'GroupId': 'sg-%02d' % n, 'GroupName': 'g' * 90 + '%02d' % n}
+                          for n in range(14)]),
     ]}],
     'describe_instances': [{'Reservations': [{'Instances': [
         {'InstanceId': 'i-asg1', 'Tags': [{'Key': 'Name', 'Value': 'ASG'}]},
@@ -903,7 +927,7 @@ ACCOUNT_PAGES = {
     ],
 }
 EVERY = {'10.3.0.11', '10.3.0.12', '10.3.0.20', '10.3.0.30', '10.3.0.40', '10.3.0.50',
-         '10.3.0.60', '10.3.0.70', '10.3.0.80', '10.3.0.99'}
+         '10.3.0.60', '10.3.0.70', '10.3.0.80', '10.3.0.97', '10.3.0.98', '10.3.0.99'}
 
 calls = []
 fake = _FakeClient(ACCOUNT_PAGES, calls)
@@ -936,6 +960,40 @@ check('only the proxy on an interface is asked about, not every proxy of the reg
       not any('prx-0other' in arn for arn in asked_arns), str(asked_arns))
 check('an address nothing owns has no name',
       '10.3.0.99' not in owners, str(owners.get('10.3.0.99')))
+
+# --- the security groups: the way into a service this file knows nothing about ---
+groups = pfl.groups_for_addresses(EVERY)
+check('the groups of an interface go out sorted and joined, whatever the service',
+      groups.get('10.3.0.97') == 'new_service_search_group|shared-by-hand', str(groups.get('10.3.0.97')))
+check('groups too long for a label are left out, so they cannot cost the batch',
+      '10.3.0.98' not in groups, str(groups.get('10.3.0.98', ''))[:60])
+check('an address nothing owns has no groups', '10.3.0.99' not in groups)
+check('the interface is asked for with the managed ones included',
+      all(c[1].get('IncludeManagedResources') is True for c in calls
+          if c[0] == 'describe_network_interfaces'), str(calls)[:200])
+unknown = pfl.name_endpoint({'srcaddr': '10.3.0.11', 'dstaddr': '10.3.0.97'}, 'dst',
+                            [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')], owners, False, groups)
+check('an end nothing named says which groups its interface is in',
+      (unknown['dst_name'], unknown['dst_type'], unknown.get('dst_sg'))
+      == ('unnamed', 'interface', 'new_service_search_group|shared-by-hand'), str(unknown))
+named_end = pfl.name_endpoint({'srcaddr': '10.3.0.11', 'dstaddr': '10.3.0.97'}, 'src',
+                              [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')], owners, False, groups)
+check('a named end does not: its series stays what it was',
+      'src_sg' not in named_end and named_end['src_name'] == 'ASG', str(named_end))
+check('and an end without groups has no label to carry',
+      'dst_sg' not in pfl.name_endpoint({'srcaddr': '10.3.0.11', 'dstaddr': '10.3.0.99'}, 'dst',
+                                        [(ipaddress.ip_network('10.3.0.0/16'), 'vpc-lab')],
+                                        owners, False, groups))
+by_group = pfl.cut_to_top_n({
+    (1, (('dst_name', 'unnamed'), ('dst_sg', 'a'), ('dst_vpc', 'lab'),
+         ('src_name', 'web'), ('src_vpc', 'lab'))): [10, 1],
+    (1, (('dst_name', 'unnamed'), ('dst_sg', 'b'), ('dst_vpc', 'lab'),
+         ('src_name', 'web'), ('src_vpc', 'lab'))): [20, 1],
+})
+check('two unnamed ends behind different groups are two pairs for the cut, not one',
+      pfl.group_of((('dst_name', 'unnamed'), ('dst_sg', 'a')))
+      != pfl.group_of((('dst_name', 'unnamed'), ('dst_sg', 'b'))) and len(by_group) == 2,
+      str(by_group))
 interface_calls = [c for c in calls if c[0] == 'describe_network_interfaces']
 check('one call finds the owner of every address of the batch',
       len(interface_calls) == 1, str(len(interface_calls)))
@@ -978,6 +1036,17 @@ check('a failed describe returns no owners instead of taking the run down',
 pfl.ec2 = _FakeClient(ACCOUNT_PAGES, [])
 check('and it is NOT cached as nameless: a transport failure is not an answer',
       pfl.owners_for_addresses({'10.3.0.11'}).get('10.3.0.11') == ('ASG', 'instance'))
+
+# A boto3 that does not know the managed-resources parameter refuses the call as a
+# whole; the names must not go with it.
+old_boto = []
+pfl.ec2 = _FakeClient(ACCOUNT_PAGES, old_boto, refuses_managed=True)
+pfl._owner_by_address.clear()
+refused_then = pfl.owners_for_addresses({'10.3.0.11'})
+check('a boto3 that refuses the managed-resources parameter is asked again without it',
+      refused_then.get('10.3.0.11') == ('ASG', 'instance')
+      and [('IncludeManagedResources' in c[1]) for c in old_boto
+           if c[0] == 'describe_network_interfaces'] == [True, False], str(old_boto))
 
 pfl.ec2, pfl.elbv2, pfl.rds, pfl.lambda_client, pfl.tagging = CLIENTS_WERE
 

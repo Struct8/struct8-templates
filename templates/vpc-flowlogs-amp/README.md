@@ -86,6 +86,7 @@ Scaling group that scales to zero and back, continues the SAME series.
 | `src_name`, `dst_name` | The owner's Name tag. `S3`, `internet`, `on-premises`, `unmapped-network` for an end outside every VPC. `unnamed` when nothing owning the address carries a Name tag |
 | `src_type`, `dst_type` | What the owner is: `instance`, `nat_gateway`, `vpc_endpoint`, `load_balancer`, `lambda`, `rds`, `rds_proxy`, `efs`, `elasticache`, `ecs_task`/`ecs_service`, or the kind of an outside end |
 | `src_vpc`, `dst_vpc` | The VPC's Name tag, or `external` |
+| `src_sg`, `dst_sg` | Only on an end that is `unnamed`: the names of the security groups of its interface, sorted and joined by a vertical bar. See below |
 | `service_port`, `protocol`, `egress`, `hop` | As before: the service, the IP protocol, the door out of the VPC, and whether the record is a hop through a middlebox |
 
 The owner is found from the address: one `ec2:DescribeNetworkInterfaces` says
@@ -107,6 +108,22 @@ RDS proxy then falls back to its own name, which the generator took from the box
 Any other owner is written as `unnamed`, and the Lambda's log says which call
 failed. An EFS file system or an ElastiCache cluster keeps its kind: its id is on
 the interface, but the id is not the name of any box.
+
+### An end nothing named: its security groups
+
+Every interface of every service is in at least one security group, and the call
+that finds the interface already returns their names. So an end that no owner
+named carries them as `src_sg` / `dst_sg`, and the diagram, which knows the name
+of the security group each box carries, says whose interface it is. Nothing here
+recognises the service, reads its tags or needs a permission for it: a service
+this code has never heard of is matched the day a box of it is drawn with its
+security group. Left out: a value past 1000 characters (Prometheus refuses a
+long label for the whole request), and the ends already named, whose series
+stay what they were.
+
+The interface is asked for with `IncludeManagedResources`, so an interface a
+service owns is not left out where the account hides managed resources. A boto3
+that does not know the parameter is asked again without it.
 
 ## What was refused
 
