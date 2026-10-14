@@ -191,6 +191,10 @@ ec2 = boto3.client('ec2')
 elbv2 = boto3.client('elbv2')
 rds = boto3.client('rds')
 lambda_client = boto3.client('lambda')
+# Read only when an address belongs to a Redshift cluster or a DMS replication
+# instance, whose interfaces carry no id. See `_names_by_address`.
+redshift = boto3.client('redshift')
+dms = boto3.client('dms')
 # The Name tag of every other owner, by ARN, in one call per hundred. See
 # `_tags_by_arn`.
 tagging = boto3.client('resourcegroupstaggingapi')
@@ -424,7 +428,8 @@ def value_of(record, name):
 _cidrs_cache = {'expires_at': 0.0, 'blocks': []}
 _vpc_name_by_id = {}
 _owner_by_address = {}
-_rds_cache = {'expires_at': 0.0, 'by_address': {}}
+# Per kind: `{'expires_at': ..., 'by_address': {...}}`. See `_names_by_address`.
+_address_cache = {}
 
 
 def _expiry():
@@ -474,9 +479,43 @@ _ELASTICACHE_NODE = re.compile(r'^ElastiCache (\S+)$')
 # `Network interface for DBProxy <proxy name>`.
 _DB_PROXY = re.compile(r'^Network interface for DBProxy (\S+)$')
 
+# The four below come from sources, not from an account: none of these services
+# ran in the one the three above were read from. AWS documentation where it
+# states the text, and code others publish where it does not. A description that
+# differs leaves the interface unnamed, as it was before these were added.
+# `ES <domain name>`, the same for OpenSearch and Elasticsearch domains: AWS's
+# own workload-discovery-on-aws (`constants.mjs`) keys on it.
+_OPENSEARCH_DOMAIN = re.compile(r'^ES (\S+)$')
+# `Amazon EKS <cluster name>`, on the interfaces of the control plane: the EKS
+# user guide, "VPC and subnet requirements".
+_EKS_CLUSTER = re.compile(r'^Amazon EKS (\S+)$')
+# `AWS created network interface for directory d-<id>`, with a final period in a
+# published sample: the Directory Service admin guide, "What gets created".
+_DIRECTORY = re.compile(r'^AWS created network interface for directory (d-[0-9a-f]+)\.?$')
+# A broker's interface names its cluster's ARN. Only a regular expression in a
+# published tool shows it, not a whole description, so it is searched for
+# anywhere in the text instead of matched from the start.
+_MSK_BROKER = re.compile(
+    r'Amazon MSK network interface for cluster '
+    r'(arn:aws:kafka:[^:\s]+:[0-9]+:cluster/([^/\s]+)/[0-9a-f-]+)')
+
 # Owners whose tags are read by ARN through `tag:GetResources`: one permission
 # for every service, instead of one per service.
-_TAGGED_BY_ARN = ('efs', 'elasticache')
+_TAGGED_BY_ARN = ('efs', 'elasticache', 'opensearch', 'eks_cluster', 'directory', 'msk')
+
+# Owners whose interface carries no id at all, only one fixed description. The
+# address is the key, matched against the addresses each service reports for its
+# own resources; see `_names_by_address`.
+_BY_ADDRESS = {
+    # Read off interfaces in a real account. `rds:DescribeDBInstances` lists
+    # DocumentDB and Neptune instances too; no source shows the description of
+    # their interfaces, so they are named here only if it is this one.
+    'RDSNetworkInterface': 'rds',
+    # Code others publish (fivexl/aws-eni-identifier, cloud-custodian).
+    'RedshiftNetworkInterface': 'redshift',
+    # The DMS user guide, "Setting up a network for a replication instance".
+    'DMSNetworkInterface': 'dms',
+}
 
 
 def _name_tag(tags):
@@ -537,10 +576,26 @@ def owner_of_interface(interface):
         # The proxy's ARN carries an id of its own, not the name, so the name is
         # what is kept here; `_tags_by_id` looks the ARN up.
         return 'rds_proxy', proxy.group(1), proxy.group(1)
-    if description == 'RDSNetworkInterface':
-        # No database id anywhere on the interface; the address is the key, see
-        # `_rds_names_by_address`.
-        return 'rds', None, ''
+    domain = _OPENSEARCH_DOMAIN.match(description)
+    if domain:
+        return ('opensearch', 'arn:aws:es:' + REGION + ':' + account + ':domain/'
+                + domain.group(1), domain.group(1))
+    cluster = _EKS_CLUSTER.match(description)
+    if cluster:
+        return ('eks_cluster', 'arn:aws:eks:' + REGION + ':' + account + ':cluster/'
+                + cluster.group(1), cluster.group(1))
+    directory = _DIRECTORY.match(description)
+    if directory:
+        return ('directory', 'arn:aws:ds:' + REGION + ':' + account + ':directory/'
+                + directory.group(1), '')
+    broker = _MSK_BROKER.search(description)
+    if broker:
+        return 'msk', broker.group(1), broker.group(2)
+    by_address = _BY_ADDRESS.get(description)
+    if by_address:
+        # No id anywhere on the interface; the address is the key, see
+        # `_names_by_address`.
+        return by_address, None, ''
     if description.startswith('arn:aws:ecs:'):
         return 'ecs_task', None, ''
     return kind or 'network_interface', None, ''
@@ -628,7 +683,21 @@ def _tags_by_arn(arns):
     return out
 
 
-def _rds_names_by_address():
+def _names_by_address(kind):
+    """`address -> name` for every resource of one kind that is found by address.
+
+    Cached per kind, so a batch that meets a database does not list the
+    replication instances too, and a kind it never meets is never listed.
+    """
+    cached = _address_cache.get(kind)
+    if cached and cached['expires_at'] > time.time():
+        return cached['by_address']
+    by_address = _ADDRESS_READERS[kind]()
+    _address_cache[kind] = {'expires_at': _expiry(), 'by_address': by_address}
+    return by_address
+
+
+def _rds_addresses():
     """`address -> Name tag` for every database this account runs here.
 
     A database's interface carries neither its identifier nor a tag -- only the
@@ -637,8 +706,6 @@ def _rds_names_by_address():
     a private database still resolves from outside the VPC, to its private
     address, which is the one the flow log records.
     """
-    if _rds_cache['expires_at'] > time.time():
-        return _rds_cache['by_address']
     by_address = {}
     for database in _paginated(rds, 'describe_db_instances', 'DBInstances'):
         host = (database.get('Endpoint') or {}).get('Address')
@@ -650,9 +717,49 @@ def _rds_names_by_address():
                 by_address[info[4][0]] = name
         except OSError:
             continue
-    _rds_cache['by_address'] = by_address
-    _rds_cache['expires_at'] = _expiry()
     return by_address
+
+
+def _redshift_addresses():
+    """`address -> Name tag` for every node of every provisioned Redshift cluster.
+
+    `ClusterNodes` lists the leader and the compute nodes, each with its
+    `PrivateIPAddress`, and the cluster's tags come in the same answer. Without a
+    Name tag the cluster's identifier answers, which the generator took from the box.
+    """
+    by_address = {}
+    for cluster in _paginated(redshift, 'describe_clusters', 'Clusters'):
+        name = _name_tag(cluster.get('Tags')) or cluster.get('ClusterIdentifier', '')
+        for node in cluster.get('ClusterNodes', []):
+            if node.get('PrivateIPAddress'):
+                by_address[node['PrivateIPAddress']] = name
+    return by_address
+
+
+def _dms_addresses():
+    """`address -> Name tag` for every DMS replication instance.
+
+    The describe carries no tags, so they are read by ARN; without them the
+    instance's identifier answers, which the generator took from the box.
+    """
+    instances = list(_paginated(dms, 'describe_replication_instances', 'ReplicationInstances'))
+    tags = {}
+    try:
+        tags = _tags_by_arn(instance['ReplicationInstanceArn'] for instance in instances
+                            if instance.get('ReplicationInstanceArn'))
+    except Exception as error:  # noqa: BLE001 -- the identifier still answers
+        print('reading the Name tag of dms failed: ' + str(error))
+    by_address = {}
+    for instance in instances:
+        name = (tags.get(instance.get('ReplicationInstanceArn'), '')
+                or instance.get('ReplicationInstanceIdentifier', ''))
+        for address in (instance.get('ReplicationInstancePrivateIpAddresses', [])
+                        + instance.get('ReplicationInstanceIpv6Addresses', [])):
+            by_address[address] = name
+    return by_address
+
+
+_ADDRESS_READERS = {'rds': _rds_addresses, 'redshift': _redshift_addresses, 'dms': _dms_addresses}
 
 
 def _describe_interfaces(chunk):
@@ -694,8 +801,9 @@ def owners_for_addresses(addresses):
 
     FROM THE INTERFACE TO ITS OWNER. One `describe_network_interfaces` by address
     says who owns each one -- an instance, a NAT gateway, an endpoint, a load
-    balancer, a Lambda function, a database -- and then each kind is asked for
-    its Name tag, once per kind per batch.
+    balancer, a Lambda function, a database, or another managed service
+    `owner_of_interface` recognises -- and then each kind is asked for its Name
+    tag, once per kind per batch.
 
     An address nobody owns any more, or whose owner has no Name tag, is cached as
     nameless, so the miss is not paid again on every object.
@@ -737,17 +845,19 @@ def owners_for_addresses(addresses):
                 # the next object: the fallback is cached like any other answer.
                 print('reading the Name tag of ' + kind + ' failed: ' + str(error))
 
-        databases = {}
-        if any(entry[0] == 'rds' for entry in owned.values()):
+        # Per kind: VPCs can reuse an address, so one kind's map never answers
+        # for an interface of another.
+        by_address = {}
+        for kind in {entry[0] for entry in owned.values()} & set(_ADDRESS_READERS):
             try:
-                databases = _rds_names_by_address()
-            except Exception as error:  # noqa: BLE001
-                print('describe_db_instances failed: ' + str(error))
+                by_address[kind] = _names_by_address(kind)
+            except Exception as error:  # noqa: BLE001 -- the run goes on unnamed
+                print('listing the addresses of ' + kind + ' failed: ' + str(error))
 
         for address in chunk:
             kind, owner_id, fallback, own_tag = owned.get(address, ('', None, '', ''))
             name = ((tags.get(owner_id, '') if owner_id else '')
-                    or databases.get(address, '') or fallback or own_tag)
+                    or by_address.get(kind, {}).get(address, '') or fallback or own_tag)
             _owner_by_address[address] = {'name': name, 'kind': kind, 'expires_at': _expiry()}
 
     return {address: (entry['name'], entry['kind'])

@@ -84,7 +84,7 @@ Scaling group that scales to zero and back, continues the SAME series.
 | Label | Value |
 |---|---|
 | `src_name`, `dst_name` | The owner's Name tag. `S3`, `internet`, `on-premises`, `unmapped-network` for an end outside every VPC. `unnamed` when nothing owning the address carries a Name tag |
-| `src_type`, `dst_type` | What the owner is: `instance`, `nat_gateway`, `vpc_endpoint`, `load_balancer`, `lambda`, `rds`, `rds_proxy`, `efs`, `elasticache`, `ecs_task`/`ecs_service`, or the kind of an outside end |
+| `src_type`, `dst_type` | What the owner is: `instance`, `nat_gateway`, `vpc_endpoint`, `load_balancer`, `lambda`, `rds` (DocumentDB included), `rds_proxy`, `efs`, `elasticache`, `opensearch`, `redshift`, `msk`, `dms`, `eks_cluster`, `directory`, `ecs_task`/`ecs_service`, or the kind of an outside end |
 | `src_vpc`, `dst_vpc` | The VPC's Name tag, or `external` |
 | `service_port`, `protocol`, `egress`, `hop` | As before: the service, the IP protocol, the door out of the VPC, and whether the record is a hop through a middlebox |
 
@@ -100,13 +100,23 @@ role needs these, all read-only:
 | `lambda:ListTags` | Function tags |
 | `rds:DescribeDBInstances` | Database tags, matched through the address the endpoint resolves to |
 | `rds:DescribeDBProxies` | The ARN of an RDS proxy, from the name its interface carries |
-| `tag:GetResources` | Tags of EFS file systems, ElastiCache clusters and RDS proxies, by ARN |
+| `redshift:DescribeClusters` | Redshift cluster tags, matched through the addresses of the cluster's nodes |
+| `dms:DescribeReplicationInstances` | DMS replication instances, matched through their addresses |
+| `tag:GetResources` | Tags of EFS file systems, ElastiCache clusters, RDS proxies, OpenSearch domains, MSK clusters, EKS clusters, directories and DMS replication instances, by ARN |
 
-A missing permission does not stop the run. A load balancer, a function or an
-RDS proxy then falls back to its own name, which the generator took from the box.
-Any other owner is written as `unnamed`, and the Lambda's log says which call
-failed. An EFS file system or an ElastiCache cluster keeps its kind: its id is on
-the interface, but the id is not the name of any box.
+A missing permission does not stop the run. A load balancer, a function, an RDS
+proxy, an OpenSearch domain, an EKS cluster or an MSK cluster then falls back to
+its own name, and so does a DMS replication instance, by its identifier: the
+generator took each of those names from the box. Any other owner is written as
+`unnamed`, and the Lambda's log says which call failed. An EFS file system, an
+ElastiCache cluster or a directory keeps its kind: its id is on the interface,
+but the id is not the name of any box.
+
+The descriptions of the RDS, EFS, ElastiCache and RDS Proxy interfaces were read
+in a real account. Those of OpenSearch, Redshift, MSK, DMS, EKS and Directory
+Service come from AWS documentation and published code, and DocumentDB is
+assumed to use the RDS one. An interface whose description differs stays
+`unnamed`.
 
 ## What was refused
 
