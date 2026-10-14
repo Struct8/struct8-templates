@@ -50,7 +50,8 @@ MODEL_ROWS = int(os.environ.get("MODEL_ROWS", "50"))
 
 MAX_MESSAGE_CHARS = 4000
 # System prompt and tool definition, counted in the estimate before each call.
-OVERHEAD_TOKENS = 600
+# Sized for SYSTEM as it is now (the WooCommerce map is most of it); raise it if SYSTEM grows.
+OVERHEAD_TOKENS = 1000
 
 lambda_client = boto3.client("lambda")
 bedrock = boto3.client("bedrock-runtime")
@@ -63,7 +64,20 @@ SYSTEM = (
     "Antes de consultar uma tabela, confira o nome dela em information_schema.tables, "
     "porque o banco pode ter prefixos nos nomes. "
     "Não invente valores: se a consulta não trouxer a resposta, diga isso. "
-    "Mostre a consulta usada quando ela ajudar a entender a resposta."
+    "Mostre a consulta usada quando ela ajudar a entender a resposta. "
+    "Responda só com a resposta final: não narre os passos e não repita uma consulta que já deu resultado. "
+    "Faça as contas no SQL (SUM, COUNT, GROUP BY) e traga só as colunas que a resposta usa. "
+    "Mapa das vendas do WooCommerce neste banco (prefixo wp_, com HPOS ativo). "
+    "Confirme cada tabela em information_schema antes de usar. "
+    "Pedidos: wp_wc_orders (id, status, total_amount, currency, date_created_gmt, type). "
+    "Os pedidos não estão em wp_posts, porque a sincronização com wp_posts está desligada. "
+    "Status: vêm com prefixo wc-. As vendas pagas são wc-completed e wc-processing, salvo se a pergunta pedir outro critério. "
+    "Itens vendidos: wp_wc_order_product_lookup (order_id, product_id, product_qty, product_net_revenue, date_created). "
+    "A quantidade vendida é SUM(product_qty). "
+    "Itens de um pedido: wp_woocommerce_order_items (order_item_id, order_item_name, order_id). "
+    "A itemmeta tem _product_id, _qty e _line_total; não existe a chave _name. "
+    "Nome do produto: wp_posts com post_type = 'product' e post_title, ligado pelo _product_id. "
+    "Moeda: wp_wc_orders.currency, ou wp_options com option_name = 'woocommerce_currency'. Não presuma a moeda."
 )
 
 TOOL_CONFIG = {
