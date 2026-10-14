@@ -8,7 +8,8 @@ Environment (set on the function by the template):
   ATHENA_WORKGROUP  workgroup the queries run in
   GLUE_DATABASE     database that holds the log table
   GLUE_TABLE        the log table (one row per request)
-  ACCESS_KEY        secret the page asks for as ?key=... ; empty closes the page
+  ACCESS_KEY        optional. Empty or absent: the page opens on the function URL with no
+                    key. Set: the page asks for it as ?key=... and answers 403 without it
 
 Nothing the caller sends reaches the SQL: the period is picked from a fixed list and
 every other value in a query is a number or a date computed here.
@@ -445,7 +446,10 @@ def page(period, lang, key, body):
     text = TEXT[lang]
     links = []
     for name in PERIODS:
-        query = urlencode({"key": key, "range": name, "lang": lang})
+        fields = {"range": name, "lang": lang}
+        if key:
+            fields = {"key": key, **fields}
+        query = urlencode(fields)
         links.append(f'<a href="?{esc(query)}"{" class=on" if name == period else ""}>{esc(text["period"][name])}</a>')
     return (
         f'<!doctype html><html lang="{lang}"><head><meta charset="utf-8">'
@@ -481,9 +485,10 @@ def handler(event, context):
     if lang not in TEXT:
         lang = "en"
 
-    given = params.get("key", "")
-    # An empty ACCESS_KEY closes the page: it is never open by omission.
-    if not ACCESS_KEY or not hmac.compare_digest(given.encode(), ACCESS_KEY.encode()):
+    # With no ACCESS_KEY the page is open, so the template works on the first visit.
+    # With one, it is the only way in; any ?key= sent to an open page is ignored.
+    given = params.get("key", "") if ACCESS_KEY else ""
+    if ACCESS_KEY and not hmac.compare_digest(given.encode(), ACCESS_KEY.encode()):
         return reply(403, TEXT[lang]["forbidden"], "text/plain; charset=utf-8")
 
     period = params.get("range", DEFAULT_PERIOD)
