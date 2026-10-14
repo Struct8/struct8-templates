@@ -15,11 +15,14 @@ one call's worst case.
 
 Environment (written by the compile from the connections, and set by the template):
   AWS_LAMBDA_FUNCTION_NAME_0        name of the db-query function (the connection to it has no label)
-  MODEL_CHOICES                     JSON list of {"key", "label"}; the key picks the profile
   AWS_BEDROCK_INFERENCE_PROFILE_ARN_<key>
-                                    application inference profile of each choice
-  PRICE_TABLE                       JSON {key: {"input_per_1k", "output_per_1k"}} in USD.
-                                    A choice without a price is refused: no call without a price
+                                    application inference profile connected to this function, one
+                                    per model. The choices are read from these names: each key is
+                                    the connection's label, and the label shown is the profile's name
+                                    in Bedrock (GetInferenceProfile). A new connection is a new choice.
+  PRICE_TABLE                       JSON {key: {"input_per_1k", "output_per_1k"}} in USD, by the same
+                                    key. A choice without a price is listed but refused: no call
+                                    without a price
   AWS_DYNAMODB_TABLE_NAME_0         DynamoDB table with the day's spend (partition key pk, string)
   DAILY_BUDGET_USD                  most the chat may spend in a UTC day. Unset: 0, nothing runs
   MAX_OUTPUT_TOKENS                 maxTokens of each model call
@@ -36,7 +39,7 @@ from datetime import datetime, timezone
 import boto3
 
 DB_QUERY_FUNCTION = os.environ.get("AWS_LAMBDA_FUNCTION_NAME_0", "")
-MODELS = json.loads(os.environ.get("MODEL_CHOICES", "[]"))
+PROFILE_PREFIX = "AWS_BEDROCK_INFERENCE_PROFILE_ARN_"
 PRICES = json.loads(os.environ.get("PRICE_TABLE", "{}"))
 BUDGET_TABLE = os.environ.get("AWS_DYNAMODB_TABLE_NAME_0", "")
 DAILY_BUDGET_USD = float(os.environ.get("DAILY_BUDGET_USD", "0"))
@@ -51,6 +54,7 @@ OVERHEAD_TOKENS = 600
 
 lambda_client = boto3.client("lambda")
 bedrock = boto3.client("bedrock-runtime")
+bedrock_control = boto3.client("bedrock")
 dynamodb = boto3.client("dynamodb")
 
 SYSTEM = (
@@ -216,7 +220,8 @@ const select = $("model");
 MODELS.forEach((m) => {
   const option = document.createElement("option");
   option.value = m.key;
-  option.textContent = m.label;
+  option.textContent = m.priced ? m.label : m.label + " (sem preço configurado)";
+  option.disabled = !m.priced;
   select.append(option);
 });
 
@@ -350,15 +355,32 @@ def conversation(items):
     return messages
 
 
+def model_choices():
+    """One choice per application profile connected to this function, named as Bedrock names the profile."""
+    choices = []
+    for name in sorted(os.environ):
+        arn = os.environ[name]
+        if not name.startswith(PROFILE_PREFIX) or not arn:
+            continue
+        key = name[len(PROFILE_PREFIX):]
+        label = key
+        try:
+            label = bedrock_control.get_inference_profile(inferenceProfileIdentifier=arn)["inferenceProfileName"]
+        except Exception:
+            # The page still lists the choice; the call is refused later if the profile cannot be read.
+            pass
+        choices.append({"key": key, "label": label, "priced": key in PRICES})
+    return choices
+
+
 def chat(body):
-    choice = next((m for m in MODELS if m.get("key") == body.get("model")), None)
-    if choice is None:
-        return {"error": "Modelo desconhecido."}
-    key = choice["key"]
-    profile_arn = os.environ.get(f"AWS_BEDROCK_INFERENCE_PROFILE_ARN_{key}", "")
+    key = str(body.get("model", ""))
+    profile_arn = os.environ.get(PROFILE_PREFIX + key, "") if key else ""
     price = PRICES.get(key)
-    if not profile_arn or not price:
-        return {"error": "Este modelo não tem perfil de inferência ou preço configurado."}
+    if not profile_arn:
+        return {"error": "Modelo desconhecido."}
+    if not price:
+        return {"error": "Este modelo não tem preço configurado. Nenhuma chamada foi feita."}
 
     messages = conversation(body.get("messages") or [])
     if not messages or messages[-1]["role"] != "user":
@@ -425,7 +447,7 @@ def handler(event, context):
     path = event.get("rawPath", "/")
 
     if method == "GET" and path == "/":
-        models = json.dumps([{"key": m["key"], "label": m["label"]} for m in MODELS]).replace("<", "\\u003c")
+        models = json.dumps(model_choices()).replace("<", "\\u003c")
         return reply(200, PAGE.replace("__MODELS__", models))
 
     if method == "POST" and path == "/api/query":
