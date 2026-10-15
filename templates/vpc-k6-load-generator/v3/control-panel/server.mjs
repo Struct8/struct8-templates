@@ -199,7 +199,12 @@ function validateWordpress(input, errors) {
   if (!Number.isFinite(abortP95) || abortP95 < 0 || abortP95 > 600)
     errors.push("The slow-page limit must be a number of seconds from 0 to 600. Use 0 to never stop the test for slowness.");
 
-  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true, abortP95 };
+  // Whole percent of pages; 0 never stops the run for failures (wordpress.js ABORT_FAIL_PCT).
+  const abortFail = Number(input.abortFail ?? 40);
+  if (!Number.isInteger(abortFail) || abortFail < 0 || abortFail > 100)
+    errors.push("The page failure limit must be a whole percentage from 0 to 100. Use 0 to never stop the test for failures.");
+
+  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true, abortP95, abortFail };
   if (profile === "curve") {
     const curve = validatePoints(input.points, errors, RATE_LEVEL);
     return { ...common, points: curve.points, stages: curve.stages, startRate: curve.start, peak: curve.peak, totalSeconds: curve.totalSeconds };
@@ -382,6 +387,7 @@ async function start(cfg) {
       "-e", `MAX_VUS=${MAX_VUS}`,
       "-e", `FETCH_ASSETS=${cfg.fetchAssets ? "on" : "off"}`,
       "-e", `ABORT_P95_S=${cfg.abortP95}`,
+      "-e", `ABORT_FAIL_PCT=${cfg.abortFail}`,
     );
   } else {
     // The single-URL test, exactly as v2 runs it.
