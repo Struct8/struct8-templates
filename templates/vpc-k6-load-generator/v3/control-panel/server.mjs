@@ -204,7 +204,19 @@ function validateWordpress(input, errors) {
   if (!Number.isInteger(abortFail) || abortFail < 0 || abortFail > 100)
     errors.push("The page failure limit must be a whole percentage from 0 to 100. Use 0 to never stop the test for failures.");
 
-  const common = { scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true, abortP95, abortFail };
+  // Share of visits that carry a login cookie (wordpress.js LOGGED_IN_PCT); 0 is every visit anonymous.
+  const loggedInPct = Number(input.loggedInPct ?? 0);
+  if (!Number.isFinite(loggedInPct) || loggedInPct < 0 || loggedInPct > 100)
+    errors.push("The share of logged-in visits must be a number from 0 to 100.");
+
+  // Which pages the visits go to (wordpress.js POPULARITY).
+  const popularity = String(input.popularity ?? "uniform");
+  if (!["uniform", "zipf"].includes(popularity)) errors.push("Page popularity must be uniform or zipf.");
+
+  const common = {
+    scenario: "wordpress", profile, thinkMin, thinkMax, fetchAssets: input.fetchAssets === true, abortP95, abortFail,
+    loggedInPct, popularity,
+  };
   if (profile === "curve") {
     const curve = validatePoints(input.points, errors, RATE_LEVEL);
     return { ...common, points: curve.points, stages: curve.stages, startRate: curve.start, peak: curve.peak, totalSeconds: curve.totalSeconds };
@@ -388,6 +400,8 @@ async function start(cfg) {
       "-e", `FETCH_ASSETS=${cfg.fetchAssets ? "on" : "off"}`,
       "-e", `ABORT_P95_S=${cfg.abortP95}`,
       "-e", `ABORT_FAIL_PCT=${cfg.abortFail}`,
+      "-e", `LOGGED_IN_PCT=${cfg.loggedInPct}`,
+      "-e", `POPULARITY=${cfg.popularity}`,
     );
   } else {
     // The single-URL test, exactly as v2 runs it.

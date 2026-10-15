@@ -252,6 +252,21 @@
             <label class="check"><input id="wpAssets" type="checkbox" /> Also download images, CSS and JS</label>
             <div class="hint">Off by default: behind a CDN they come from its cache and never reach WordPress.</div>
           </div>
+          <div class="row">
+            <div class="field">
+              <label for="wpLoggedIn">Visits that carry a login cookie (%)</label>
+              <input id="wpLoggedIn" type="number" min="0" max="100" step="1" value="0" aria-describedby="wpLoggedInHint" />
+              <div class="hint" id="wpLoggedInHint">The cookie is made up: a CDN sends these visits to WordPress without using its cache, but they cost less than a real logged-in page. Every visit starts with no cookies.</div>
+            </div>
+            <div class="field">
+              <label for="wpPopularity">Which pages get the visits</label>
+              <select id="wpPopularity" aria-describedby="wpPopularityHint">
+                <option value="uniform" selected>All pages alike</option>
+                <option value="zipf">A few pages get most visits</option>
+              </select>
+              <div class="hint" id="wpPopularityHint">The second option is how a real site is read: the newest pages first in the site's list get the most visits.</div>
+            </div>
+          </div>
         </div>
 
         <div class="field request-only">
@@ -983,6 +998,8 @@
             points: editors.wordpress.points.map((p) => ({ t: p.t, rate: p.v })),
             thinkMin: Number($("wpThinkMin").value), thinkMax: Number($("wpThinkMax").value),
             fetchAssets: $("wpAssets").checked,
+            loggedInPct: $("wpLoggedIn").value === "" ? 0 : Number($("wpLoggedIn").value),
+            popularity: $("wpPopularity").value,
             abortP95: $("wpAbortP95").value === "" ? 30 : Number($("wpAbortP95").value),
             abortFail: $("wpAbortFail").value === "" ? 40 : Number($("wpAbortFail").value),
           }

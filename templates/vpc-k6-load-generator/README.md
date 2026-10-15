@@ -189,6 +189,11 @@ climbing when the site slows down, which is what shows where it breaks.
 | `MAX_VUS` | `1000` | Concurrent visits k6 may keep open. Runs out on a very slow site: `dropped_iterations` then counts the visits it could not start |
 | `FETCH_ASSETS` | `off` | `on` downloads the images, CSS and JS of each page once per visit. Behind a CDN they come from its cache and never reach WordPress |
 | `SEARCH_WORDS` | a list of 16 words | Comma-separated words for the searches |
+| `VISITOR_COOKIES` | `fresh` | `fresh`: every visit starts with no cookies, like a private window. `shared`: the cookies a virtual user receives are kept for its later visits, so a session cookie WooCommerce sets on `/cart` is sent on every one of them |
+| `LOGGED_IN_PCT` | `0` | Percent of visits that carry a login cookie. The cookie is made up, so WordPress treats the visit as anonymous, but a CDN rule on the cookie name sends it to the origin without using the cache. A real logged-in page costs the origin more than this one |
+| `POPULARITY` / `ZIPF_S` | `uniform` / `1` | `uniform`: every page has the same chance. `zipf`: the page at rank *r* in the site's list (newest first) gets a weight of 1 / *r*^`ZIPF_S`, so a few pages get most visits, as on a real site. With 50 posts and `ZIPF_S=1`, the first 5 get about half of the post visits |
+
+The run counts `cdn_cache_hits`, `cdn_cache_misses` and `cdn_cache_unknown` from the `X-Cache` header CloudFront sets, and `responses_with_set_cookie` for the answers that try to set a cookie. Each is tagged `visitor` (`anon` or `logged_in`), and the page requests carry the same tag. The panel sends `LOGGED_IN_PCT` and `POPULARITY`. `/opt/k6/run.sh` does not pass these four variables to k6, for the same reason as `STAGES`: it is written by the bootstrap, and adding them would change the `user_data` of every v3 generator. From Debug Access, run k6 with `-e` flags.
 
 ```bash
 K6_SCENARIO=wordpress PROFILE=steps PEAK=20 TARGET_URL=https://wp.example.com/ /opt/k6/run.sh

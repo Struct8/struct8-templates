@@ -13,6 +13,23 @@
 // Read-only on purpose: no comments, no contact form, no login. A form sends
 // e-mail and a comment writes to the database; both belong in a separate test.
 //
+// How close the visitors are to real ones, and what to read from the run:
+//   * Every visit starts with an empty cookie jar, like a private window
+//     (VISITOR_COOKIES=fresh, the default). With `shared` the jar of the virtual
+//     user is kept from one visit to the next, so a cookie WooCommerce sets on
+//     /cart is sent on every later visit of that user.
+//   * LOGGED_IN_PCT is the share of visits that carry a login cookie. The cookie
+//     is made up, so WordPress does not accept it; it only makes the visit take
+//     the path a CDN sends to the origin (the cache is bypassed). A real
+//     logged-in page costs the origin more than this one does.
+//   * POPULARITY=zipf makes a few pages receive most of the visits, as on a real
+//     site (ZIPF_S is how steep: 1 is the usual value; the list order of the
+//     REST API is the ranking, newest first). `uniform` picks every page with
+//     the same chance.
+//   * cdn_cache_hits, cdn_cache_misses and cdn_cache_unknown count the X-Cache
+//     header CloudFront sets, and responses_with_set_cookie counts the answers
+//     that tried to set a cookie, each by visitor (anon or logged_in).
+//
 // On the generator: the panel's WordPress mode, or through Debug Access
 //   K6_SCENARIO=wordpress PROFILE=steps PEAK=20 TARGET_URL=https://wp.example.com/ /opt/k6/run.sh
 // Anywhere else:
@@ -51,6 +68,21 @@ const ABORT_AFTER = __ENV.ABORT_AFTER || '3m';
 // minute; 0 never stops it for failures. A site that is slow, not down, fails some
 // pages while the autoscaling catches up, so the default leaves room for that.
 const ABORT_FAIL_PCT = Number(__ENV.ABORT_FAIL_PCT || 40);
+const VISITOR_COOKIES = __ENV.VISITOR_COOKIES || 'fresh'; // fresh | shared
+const LOGGED_IN_PCT = Number(__ENV.LOGGED_IN_PCT || 0); // whole percent of visits that carry a login cookie
+const POPULARITY = __ENV.POPULARITY || 'uniform'; // uniform | zipf
+const ZIPF_S = Number(__ENV.ZIPF_S || 1);
+// The name starts like the cookie WordPress sets after a login, which is what a CDN
+// rule matches on. The value is made up.
+const LOGGED_IN_COOKIE = 'wordpress_logged_in_k6loadtest';
+
+if (!['fresh', 'shared'].includes(VISITOR_COOKIES))
+  throw new Error(`VISITOR_COOKIES must be fresh or shared, not "${VISITOR_COOKIES}"`);
+if (!Number.isFinite(LOGGED_IN_PCT) || LOGGED_IN_PCT < 0 || LOGGED_IN_PCT > 100)
+  throw new Error('LOGGED_IN_PCT must be a number from 0 to 100');
+if (!['uniform', 'zipf'].includes(POPULARITY))
+  throw new Error(`POPULARITY must be uniform or zipf, not "${POPULARITY}"`);
+if (!Number.isFinite(ZIPF_S) || ZIPF_S <= 0) throw new Error('ZIPF_S must be a number above 0');
 
 const SEARCH_WORDS = (
   __ENV.SEARCH_WORDS ||
@@ -151,6 +183,11 @@ export const options = {
 };
 
 const visits = new Counter('visits');
+// What the CDN and the origin did to each answer, by visitor (anon | logged_in).
+const cacheHits = new Counter('cdn_cache_hits');
+const cacheMisses = new Counter('cdn_cache_misses');
+const cacheUnknown = new Counter('cdn_cache_unknown'); // no X-Cache header, or a value that is neither
+const setCookies = new Counter('responses_with_set_cookie');
 
 // ---------------------------------------------------------------- discovery
 
@@ -182,6 +219,11 @@ export function setup() {
   console.log(
     `Site read: ${site.posts.length} posts, ${site.pages.length} pages, ${site.categories.length} categories with posts.`
   );
+  console.log(
+    `Visitors: cookies ${VISITOR_COOKIES}, ${LOGGED_IN_PCT}% logged in, page popularity ${POPULARITY}` +
+      (POPULARITY === 'zipf' ? ` (s=${ZIPF_S})` : '') +
+      '.'
+  );
   if (site.posts.length + site.pages.length === 0)
     console.warn('The REST API listed nothing: the visits will only see the home page and searches.');
   return site;
@@ -189,7 +231,35 @@ export function setup() {
 
 // ---------------------------------------------------------------- one visit
 
-const pick = (list) => list[Math.floor(Math.random() * list.length)];
+const pickUniform = (list) => list[Math.floor(Math.random() * list.length)];
+
+// Zipf: the page at rank r (1 = first in the list) gets a weight of 1 / r^s. The cumulative
+// weights of a list of n pages are computed once.
+const zipfCumulative = {};
+function zipfIndex(n) {
+  let cum = zipfCumulative[n];
+  if (!cum) {
+    cum = [];
+    let total = 0;
+    for (let rank = 1; rank <= n; rank++) {
+      total += 1 / Math.pow(rank, ZIPF_S);
+      cum.push(total);
+    }
+    zipfCumulative[n] = cum;
+  }
+  const x = Math.random() * cum[n - 1];
+  let lo = 0;
+  let hi = n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// A page of the site. The search words always have the same chance.
+const pick = (list) => (POPULARITY === 'zipf' ? list[zipfIndex(list.length)] : pickUniform(list));
 
 // [weight, kind]: where a person goes. A kind with no URL on this site is skipped.
 const ENTRY = [
@@ -231,7 +301,7 @@ function urlFor(kind, site) {
     case 'category':
       return pick(site.categories);
     case 'search':
-      return `${BASE}/?s=${encodeURIComponent(pick(SEARCH_WORDS))}`;
+      return `${BASE}/?s=${encodeURIComponent(pickUniform(SEARCH_WORDS))}`;
     default:
       return `${BASE}/`;
   }
@@ -244,7 +314,16 @@ function available(site) {
     (kind !== 'category' || site.categories.length > 0);
 }
 
-function fetchAssets(res, seen) {
+// The request parameters of one visitor: the cookie jar of the visit (or the virtual user's, when
+// shared) and, for a logged-in visit, the login cookie.
+function paramsFor(visit, extra) {
+  const params = { headers: HEADERS, ...extra };
+  if (visit.jar) params.jar = visit.jar;
+  if (visit.loggedIn) params.cookies = { [LOGGED_IN_COOKIE]: 'k6loadtest' };
+  return params;
+}
+
+function fetchAssets(res, seen, visit) {
   const doc = parseHTML(res.body);
   const host = BASE.replace(/^https?:\/\//, '');
   const urls = [];
@@ -263,19 +342,35 @@ function fetchAssets(res, seen) {
   // A browser opens about six connections per host.
   for (let i = 0; i < urls.length; i += 6)
     http.batch(
-      urls.slice(i, i + 6).map((u) => ['GET', u, null, { headers: HEADERS, tags: { kind: 'asset', page: 'asset' } }])
+      urls
+        .slice(i, i + 6)
+        .map((u) => ['GET', u, null, paramsFor(visit, { tags: { kind: 'asset', page: 'asset', visitor: visit.visitor } })])
     );
 }
 
-function view(kind, url, seen) {
-  const res = http.get(url, {
-    headers: HEADERS,
-    // The body is kept only when the assets are fetched from it.
-    responseType: FETCH_ASSETS ? 'text' : 'none',
-    tags: { kind: 'page', page: kind }
-  });
+// What the CDN did with an answer (CloudFront's X-Cache: "Hit from cloudfront", "RefreshHit ...",
+// "Miss ...", "Error ...") and whether the origin tried to set a cookie.
+function record(res, visitor) {
+  const tags = { visitor };
+  const cache = String(res.headers['X-Cache'] || '');
+  if (/^(Hit|RefreshHit)\b/i.test(cache)) cacheHits.add(1, tags);
+  else if (/^Miss\b/i.test(cache)) cacheMisses.add(1, tags);
+  else cacheUnknown.add(1, tags);
+  if (res.cookies && Object.keys(res.cookies).length > 0) setCookies.add(1, tags);
+}
+
+function view(kind, url, seen, visit) {
+  const res = http.get(
+    url,
+    paramsFor(visit, {
+      // The body is kept only when the assets are fetched from it.
+      responseType: FETCH_ASSETS ? 'text' : 'none',
+      tags: { kind: 'page', page: kind, visitor: visit.visitor }
+    })
+  );
   check(res, { 'page answered 200': (r) => r.status === 200 }, { page: kind });
-  if (FETCH_ASSETS && res.status === 200) fetchAssets(res, seen);
+  record(res, visit.visitor);
+  if (FETCH_ASSETS && res.status === 200) fetchAssets(res, seen, visit);
 }
 
 export default function (site) {
@@ -283,9 +378,16 @@ export default function (site) {
   const usable = available(site);
   const depth = weighted(DEPTH);
   const seen = new Set(); // what this visitor's browser already has
+  const loggedIn = Math.random() * 100 < LOGGED_IN_PCT;
+  const visit = {
+    loggedIn,
+    visitor: loggedIn ? 'logged_in' : 'anon',
+    // A new jar is a browser with no cookies. null leaves the jar of the virtual user in use.
+    jar: VISITOR_COOKIES === 'fresh' ? new http.CookieJar() : null
+  };
   let kind = weighted(ENTRY, usable);
   for (let i = 0; i < depth; i++) {
-    view(kind, urlFor(kind, site), seen);
+    view(kind, urlFor(kind, site), seen, visit);
     if (i < depth - 1) {
       sleep(THINK_MIN + Math.random() * (THINK_MAX - THINK_MIN));
       kind = weighted(NEXT, usable);
