@@ -46,6 +46,11 @@ const FETCH_ASSETS = (__ENV.FETCH_ASSETS || 'off') === 'on';
 // stopping at the first slow minute ends the run before it can show that.
 const ABORT_P95_MS = Math.round(Number(__ENV.ABORT_P95_S || 30) * 1000);
 const ABORT_AFTER = __ENV.ABORT_AFTER || '3m';
+// The run also stops when more than this percent of pages fail (an error status
+// or no answer), counted over all pages since the start and checked from the first
+// minute; 0 never stops it for failures. A site that is slow, not down, fails some
+// pages while the autoscaling catches up, so the default leaves room for that.
+const ABORT_FAIL_PCT = Number(__ENV.ABORT_FAIL_PCT || 40);
 
 const SEARCH_WORDS = (
   __ENV.SEARCH_WORDS ||
@@ -124,7 +129,9 @@ export const options = {
     'http_req_failed{kind:page}': [
       'rate<0.01',
       // The site is down: stop instead of hammering it.
-      { threshold: 'rate<0.10', abortOnFail: true, delayAbortEval: '1m' }
+      ...(ABORT_FAIL_PCT > 0
+        ? [{ threshold: `rate<${(ABORT_FAIL_PCT / 100).toFixed(2)}`, abortOnFail: true, delayAbortEval: '1m' }]
+        : [])
     ],
     'http_req_duration{kind:page}': [
       'p(95)<1500',
