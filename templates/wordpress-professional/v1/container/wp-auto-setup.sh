@@ -9,7 +9,8 @@
 # messages are also kept in the administration panel. With WP_SHOP=true it also
 # installs WooCommerce and fills a shop: products with photos, flat-rate and free
 # shipping, cash on delivery and a coupon. A marker on the EFS volume ends every
-# later start in under a second.
+# later start in under a second, or after the files of the site are rebuilt on
+# the container's disk, as the next section says.
 #
 # WP_AUTO_SETUP=false turns it off, and the site starts on the WordPress
 # installation screen. A site somebody installed before this ran is left alone.
@@ -24,8 +25,41 @@
 #
 # WP_TRACING=true turns on tracing, described in its own section below. It is
 # independent of WP_AUTO_SETUP and also runs on a site that is already set up.
+#
+# Where the code lives. With the EFS volume mounted at /var/www/html, the whole
+# site is on EFS: WordPress, its plugins and its theme, 15 thousand files. Every
+# PHP file a request opens costs the NFS client a round trip even when the file
+# is in the cache, so a page of the shop made about 200 metadata operations on EFS
+# and no read of data. With the volume mounted at /var/www/html/wp-content/uploads
+# instead, this script keeps the code on the container's own disk and the volume
+# holds what has to be shared: the uploads, the keys of wp-config.php, the
+# plugins the first start installed (as one archive each), the tracing build and
+# the setup markers, all under uploads/.struct8. The section "Code on the
+# container's disk" below says how each start rebuilds the site from that.
+# Mounted at /var/www/html, everything works as it always did.
 
 log() { echo "wp-setup: $*"; }
+
+SITE=/var/www/html
+UPLOADS=$SITE/wp-content/uploads
+LOCAL_CODE=no
+if awk -v mount="$UPLOADS" '$2 == mount { found = 1 } END { exit !found }' /proc/mounts 2>/dev/null; then
+  LOCAL_CODE=yes
+fi
+if [ "$LOCAL_CODE" = yes ]; then
+  STATE=$UPLOADS/.struct8
+  # The volume is under the document root: nothing in the folder is served.
+  { mkdir -p "$STATE" && printf 'Require all denied\n' > "$STATE/.htaccess"; } || { log "the shared volume is not writable"; exit 1; }
+  log "the code is on the container's disk; the shared volume holds $STATE"
+else
+  STATE=$SITE
+fi
+
+# PHP's default for opcache.max_accelerated_files is 4000, and the site has about
+# 10 thousand PHP files: a script that does not fit is compiled again on every
+# request. OPCACHE_MAX_FILES sets another number.
+printf 'opcache.max_accelerated_files=%s\n' "${OPCACHE_MAX_FILES:-20000}" > /usr/local/etc/php/conf.d/zz-struct8-opcache.ini ||
+  log "opcache: the file limit stays at the image's default"
 
 # --- Tracing -------------------------------------------------------------------
 # With WP_TRACING=true, each web request becomes a trace: the WordPress request,
@@ -69,7 +103,17 @@ log() { echo "wp-setup: $*"; }
 #
 # Turning it off: WP_TRACING=false. The files stay on the volume and are no
 # longer loaded.
-TRACING=/var/www/html/.struct8-tracing
+#
+# With the code on the container's disk, the build stays on the volume and each
+# start copies the extension, the libraries and the bootstrap to /opt/struct8-tracing:
+# the libraries are hundreds of PHP files that PHP opens on every request.
+if [ "$LOCAL_CODE" = yes ]; then
+  TRACING=$STATE/tracing
+  TRACING_RUN=/opt/struct8-tracing
+else
+  TRACING=$SITE/.struct8-tracing
+  TRACING_RUN=$TRACING
+fi
 
 tracing_ready() {
   [ -f "$TRACING/ext/$1/opentelemetry.so" ] && [ -f "$TRACING/vendor/autoload.php" ]
@@ -78,9 +122,15 @@ tracing_ready() {
 # The two configuration files of this container. The extension loads in every
 # PHP process; the bootstrap only in Apache, so WP-CLI below runs untraced.
 tracing_turn_on() {
-  printf 'extension=%s\n' "$TRACING/ext/$1/opentelemetry.so" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new &&
+  if [ "$TRACING_RUN" != "$TRACING" ]; then
+    mkdir -p "$TRACING_RUN/ext/$1" &&
+      cp "$TRACING/ext/$1/opentelemetry.so" "$TRACING_RUN/ext/$1/opentelemetry.so" &&
+      cp -R "$TRACING/vendor" "$TRACING_RUN/vendor" &&
+      cp "$TRACING/bootstrap.php" "$TRACING_RUN/bootstrap.php" || return 1
+  fi
+  printf 'extension=%s\n' "$TRACING_RUN/ext/$1/opentelemetry.so" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new &&
     mv /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new /usr/local/etc/php/conf.d/zz-struct8-tracing.ini &&
-    printf 'php_admin_value auto_prepend_file %s\n' "$TRACING/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf.new &&
+    printf 'php_admin_value auto_prepend_file %s\n' "$TRACING_RUN/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf.new &&
     mv /etc/apache2/conf-enabled/struct8-tracing.conf.new /etc/apache2/conf-enabled/struct8-tracing.conf
 }
 
@@ -668,15 +718,211 @@ apache_workers || log "apache: the processes stay at the image's default"
 
 tracing || log "tracing: could not be turned on; the site starts without it"
 
+DONE=$STATE/.struct8-setup-done
+STARTED=$STATE/.struct8-setup-started
+LOCK=$STATE/.struct8-setup-lock
+WPCLI=/tmp/wp-cli.phar
+
+# --- Code on the container's disk ----------------------------------------------
+# Only with the volume mounted at wp-content/uploads. Every start of a task builds
+# the site's files in /var/www/html on the container's disk:
+#   1. wp-config.php. It holds no password (WordPress reads WORDPRESS_* when a
+#      request runs), but it holds the keys and salts that sign the login cookies,
+#      and every task needs the same ones: with different keys, a visitor is logged
+#      out each time the load balancer sends them to another task. The first task
+#      writes the file and keeps a copy on the volume; the others use the copy.
+#   2. WordPress, copied from /usr/src/wordpress, where the image keeps it. The
+#      version is the image's: a new image brings a new WordPress.
+#   3. The plugins and the languages the first start installed. That start saved
+#      each as an archive on the volume, and these starts unpack them: the same
+#      files in every task, and no download.
+#   4. The must-use plugin of this template.
+# A start with a new WordPress runs the database upgrade (wp core update-db), once
+# for all tasks. WP_PLUGINS_REVISION is the number of the plugin versions, 1 at the
+# first start: a new number makes the first task that starts update every plugin
+# (wp plugin update --all), save the archives again and record the number, and the
+# other tasks unpack the new archives.
+#
+# The administration panel cannot install or update a plugin or a theme in this
+# mode: the change would exist in one task only and disappear with it. The
+# must-use plugin sets DISALLOW_FILE_MODS, and WP-CLI is exempt from it.
+
+# Ownership of what this script writes as root. The uploads are not touched: they
+# are on the volume, whose access point sets the owner.
+fix_owner() {
+  if [ "$LOCAL_CODE" = yes ]; then
+    for path in wp-config.php wp-content/plugins wp-content/mu-plugins wp-content/languages wp-content/themes \
+      wp-content/upgrade wp-content/object-cache.php wp-content/index.php; do
+      [ -e "$SITE/$path" ] && chown -R www-data:www-data "$SITE/$path" 2>/dev/null
+    done
+  else
+    chown -R www-data:www-data "$SITE/wp-content" 2>/dev/null
+  fi
+  return 0
+}
+
+core_version() {
+  sed -n "s/^.wp_version = '\([^']*\)'.*/\1/p" "$SITE/wp-includes/version.php" 2>/dev/null
+}
+
+# The site's own must-use plugin: no theme or plugin update removes it.
+write_mu_plugin() {
+  mkdir -p "$SITE/wp-content/mu-plugins"
+  cat > "$SITE/wp-content/mu-plugins/struct8-site.php" <<'MU'
+<?php
+// Site settings of the WordPress Professional template, written on its first start.
+
+// XML-RPC is where password guessing goes, and nothing on this site uses it: the
+// block editor and the WordPress apps use the REST API.
+if (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST) {
+  http_response_code(403);
+  exit;
+}
+add_filter('xmlrpc_enabled', '__return_false');
+
+// Visitors who are not logged in do not get the list of users.
+add_filter('rest_endpoints', function ($endpoints) {
+  if (!is_user_logged_in()) {
+    unset($endpoints['/wp/v2/users'], $endpoints['/wp/v2/users/(?P<id>[\d]+)']);
+  }
+  return $endpoints;
+});
+
+// Messages from the site go out under its title instead of "WordPress".
+add_filter('wp_mail_from_name', function ($name) {
+  return $name === 'WordPress' ? wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES) : $name;
+});
+MU
+  [ "$LOCAL_CODE" = yes ] || return 0
+  cat >> "$SITE/wp-content/mu-plugins/struct8-site.php" <<'MU'
+
+// The code of each task is its own copy, rebuilt at every start. A plugin or a
+// theme installed or updated from the administration panel would exist in one task
+// only. WP-CLI, which the start of a task runs, is not blocked.
+if (!(defined('WP_CLI') && WP_CLI) && !defined('DISALLOW_FILE_MODS')) {
+  define('DISALLOW_FILE_MODS', true);
+}
+MU
+}
+
+local_code_config() {
+  cd "$SITE" || return 1
+  if [ -s "$STATE/wp-config.php" ]; then
+    cp "$STATE/wp-config.php" "$SITE/wp-config.php" || return 1
+  fi
+  if ! command -v docker-ensure-installed.sh >/dev/null 2>&1; then
+    log "this image has no docker-ensure-installed.sh: WordPress and wp-config.php are written when Apache starts, with keys of this task only"
+    return 0
+  fi
+  docker-ensure-installed.sh true || return 1
+  if [ ! -s "$STATE/wp-config.php" ] && [ -s "$SITE/wp-config.php" ]; then
+    # ln fails when another task kept its copy first, and that copy wins.
+    cp "$SITE/wp-config.php" "$STATE/wp-config.php.new.$$" &&
+      ln "$STATE/wp-config.php.new.$$" "$STATE/wp-config.php" 2>/dev/null
+    rm -f "$STATE/wp-config.php.new.$$"
+    if [ -s "$STATE/wp-config.php" ]; then cp "$STATE/wp-config.php" "$SITE/wp-config.php" || return 1; fi
+  fi
+  return 0
+}
+
+local_code_restore() {
+  [ "$LOCAL_CODE" = yes ] && [ -d "$STATE/packs" ] || return 0
+  mkdir -p "$SITE/wp-content" || return 1
+  for pack in "$STATE"/packs/*.tar.gz; do
+    [ -e "$pack" ] || continue
+    tar -xzf "$pack" -C "$SITE/wp-content" --no-same-owner || log "could not unpack $(basename "$pack")"
+  done
+  fix_owner
+  return 0
+}
+
+# One archive of wp-content/<item> on the volume. The file is complete when it
+# gets its name, so a task that unpacks never reads half of one.
+pack_item() {
+  name=$(echo "$1" | tr / -).tar.gz
+  tar -czf "$STATE/packs/$name.new.$$" -C "$SITE/wp-content" "$1" &&
+    mv "$STATE/packs/$name.new.$$" "$STATE/packs/$name" ||
+    { rm -f "$STATE/packs/$name.new.$$"; log "could not save $1"; return 1; }
+}
+
+# Every plugin the site has, its languages and the Redis object cache drop-in that
+# `wp redis enable` wrote.
+local_code_save() {
+  mkdir -p "$STATE/packs" || return 1
+  for dir in "$SITE"/wp-content/plugins/*/; do
+    [ -d "$dir" ] && pack_item "plugins/$(basename "$dir")"
+  done
+  for item in languages object-cache.php; do
+    [ -e "$SITE/wp-content/$item" ] && pack_item "$item"
+  done
+  return 0
+}
+
+record_versions() {
+  core_version > "$STATE/core.version" && printf '%s\n' "${WP_PLUGINS_REVISION:-1}" > "$STATE/plugins.revision"
+}
+
+versions_recorded() {
+  [ "$(core_version)" = "$(cat "$STATE/core.version" 2>/dev/null)" ] &&
+    [ "${WP_PLUGINS_REVISION:-1}" = "$(cat "$STATE/plugins.revision" 2>/dev/null)" ]
+}
+
+# Runs when the image brings another WordPress or WP_PLUGINS_REVISION changed.
+# One task does the work and the others wait for it, then unpack what it saved.
+# It never stops the site: a failure is logged, and the next start tries again.
+local_code_maintenance() {
+  versions_recorded && return 0
+  (
+    lock=$STATE/maintenance-lock
+    waited=0
+    until mkdir "$lock" 2>/dev/null; do
+      if [ "$waited" -ge 900 ]; then
+        log "maintenance: the lock is 15 minutes old: taking it over"
+        rmdir "$lock" 2>/dev/null
+        waited=0
+      else
+        sleep 5
+        waited=$((waited + 5))
+      fi
+    done
+    trap 'rmdir "$lock" 2>/dev/null' EXIT
+    if versions_recorded; then local_code_restore; exit 0; fi
+    cli=$STATE/wp-cli.phar
+    if [ ! -s "$cli" ]; then
+      curl -fsSL --retry 5 --retry-delay 5 -o "$cli.new.$$" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar &&
+        mv "$cli.new.$$" "$cli" || { rm -f "$cli.new.$$"; log "maintenance: could not download WP-CLI"; exit 0; }
+    fi
+    wp() { php "$cli" --allow-root --path="$SITE" "$@"; }
+    if ! wp core is-installed >/dev/null 2>&1; then log "maintenance: WordPress is not installed yet"; exit 0; fi
+    ok=yes
+    if [ "$(core_version)" != "$(cat "$STATE/core.version" 2>/dev/null)" ]; then
+      if wp core update-db; then log "WordPress $(core_version): database upgraded"; else ok=no; log "maintenance: the database upgrade failed"; fi
+    fi
+    if [ "${WP_PLUGINS_REVISION:-1}" != "$(cat "$STATE/plugins.revision" 2>/dev/null)" ]; then
+      if wp plugin update --all && local_code_save; then log "plugins updated and saved, revision ${WP_PLUGINS_REVISION:-1}"; else ok=no; log "maintenance: the plugin update failed"; fi
+    fi
+    [ "$ok" = yes ] && record_versions
+    fix_owner
+  )
+  return 0
+}
+
+local_code_prepare() {
+  local_code_config || { log "could not write WordPress and wp-config.php"; return 1; }
+  local_code_restore
+  write_mu_plugin
+  fix_owner
+  if [ -e "$DONE" ]; then local_code_maintenance; fi
+  return 0
+}
+
+if [ "$LOCAL_CODE" = yes ]; then
+  local_code_prepare || exit 1
+fi
+
 case "$WP_AUTO_SETUP" in
   false|False|FALSE|0|no|off) log "WP_AUTO_SETUP is off: nothing to do"; exit 0 ;;
 esac
-
-SITE=/var/www/html
-DONE=$SITE/.struct8-setup-done
-STARTED=$SITE/.struct8-setup-started
-LOCK=$SITE/.struct8-setup-lock
-WPCLI=/tmp/wp-cli.phar
 
 if [ -e "$DONE" ]; then log "site already set up"; exit 0; fi
 
@@ -684,7 +930,7 @@ if [ -e "$DONE" ]; then log "site already set up"; exit 0; fi
 # there, so one of them installs and the other waits for the marker.
 waited=0
 until mkdir "$LOCK" 2>/dev/null; do
-  if [ -e "$DONE" ]; then log "set up by another task"; exit 0; fi
+  if [ -e "$DONE" ]; then log "set up by another task"; local_code_restore; exit 0; fi
   if [ "$waited" -ge 480 ]; then
     log "the setup lock is 8 minutes old: taking it over"
     rmdir "$LOCK" 2>/dev/null
@@ -695,7 +941,7 @@ until mkdir "$LOCK" 2>/dev/null; do
   fi
 done
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
-if [ -e "$DONE" ]; then log "set up by another task"; exit 0; fi
+if [ -e "$DONE" ]; then log "set up by another task"; local_code_restore; exit 0; fi
 
 cd "$SITE" || exit 1
 if ! command -v docker-ensure-installed.sh >/dev/null 2>&1; then
@@ -761,34 +1007,7 @@ wp redis enable || log "the Redis object cache was not enabled"
 wp eval 'global $wp_offload_ses; if (!isset($wp_offload_ses)) exit(1); $wp_offload_ses->upgrade_routines();' \
   || log "the tables of WP Offload SES were not created"
 
-# A must-use plugin: no theme or plugin update removes it.
-mkdir -p "$SITE/wp-content/mu-plugins"
-cat > "$SITE/wp-content/mu-plugins/struct8-site.php" <<'MU'
-<?php
-// Site settings of the WordPress Professional template, written on its first start.
-
-// XML-RPC is where password guessing goes, and nothing on this site uses it: the
-// block editor and the WordPress apps use the REST API.
-if (defined('XMLRPC_REQUEST') && XMLRPC_REQUEST) {
-  http_response_code(403);
-  exit;
-}
-add_filter('xmlrpc_enabled', '__return_false');
-
-// Visitors who are not logged in do not get the list of users.
-add_filter('rest_endpoints', function ($endpoints) {
-  if (!is_user_logged_in()) {
-    unset($endpoints['/wp/v2/users'], $endpoints['/wp/v2/users/(?P<id>[\d]+)']);
-  }
-  return $endpoints;
-});
-
-// Messages from the site go out under its title instead of "WordPress".
-add_filter('wp_mail_from_name', function ($name) {
-  return $name === 'WordPress' ? wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES) : $name;
-});
-MU
-
+write_mu_plugin
 
 case "$WP_DEMO_CONTENT" in
   true|True|TRUE|1|yes|on) demo=yes ;;
@@ -1279,7 +1498,12 @@ PHP
   fi
 fi
 
-chown -R www-data:www-data "$SITE/wp-content" 2>/dev/null
+fix_owner
+# The marker comes last: a task that waits for it unpacks these archives.
+if [ "$LOCAL_CODE" = yes ]; then
+  { local_code_save && record_versions; } || { log "the plugins were not saved on the shared volume"; exit 1; }
+  log "the plugins are saved on the shared volume"
+fi
 touch "$DONE"
 rm -f "$STARTED" "$WPCLI"
 log "done"
