@@ -626,6 +626,46 @@ tracing() {
     fi
   ) &
 }
+# --- Apache processes ----------------------------------------------------------
+# Apache in the WordPress image (mpm_prefork) accepts up to 150 requests at the same
+# time, and each one is a PHP process of some tens of MiB. A container limited to a
+# few hundred MiB reaches its limit in a short burst of requests and the kernel kills
+# it (exit code 137, "OutOfMemoryError: Container killed due to memory usage"). The
+# load balancer's health check then fails, and the replacement starts with a cold
+# opcache that reads the whole site from the EFS volume. This keeps the number of
+# processes inside the container's memory: the requests beyond it wait in Apache's
+# queue instead of killing the task. A process also ends after 500 requests, so a
+# memory leak of a plugin cannot grow without bound.
+#
+# The number is (memory limit - APACHE_FIXED_MEMORY_MIB) / APACHE_WORKER_MEMORY_MIB,
+# never below 4 or above 150. Optional settings:
+#   APACHE_MAX_WORKERS         the number of processes, instead of the calculation
+#   APACHE_WORKER_MEMORY_MIB   memory of one process, default 64. Read the maximum
+#                              of the service's MemoryUtilization after a load test
+#                              and adjust it.
+#   APACHE_FIXED_MEMORY_MIB    kept for what is not a process: the opcache (128), the
+#                              Apache parent and the tracing libraries, default 256
+apache_workers() {
+  workers=$APACHE_MAX_WORKERS
+  if [ -z "$workers" ]; then
+    limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null)
+    case "$limit" in
+      ''|*[!0-9]*) log "apache: no memory limit on this container: the processes stay at the image's default"; return 0 ;;
+    esac
+    limit_mib=$((limit / 1048576))
+    if [ "$limit_mib" -ge 65536 ]; then log "apache: no memory limit on this container: the processes stay at the image's default"; return 0; fi
+    workers=$(( (limit_mib - ${APACHE_FIXED_MEMORY_MIB:-256}) / ${APACHE_WORKER_MEMORY_MIB:-64} ))
+  fi
+  case "$workers" in ''|*[!0-9]*) log "apache: APACHE_MAX_WORKERS is not a number: ignored"; return 0 ;; esac
+  [ "$workers" -ge 4 ] || workers=4
+  [ "$workers" -le 150 ] || workers=150
+  printf '<IfModule mpm_prefork_module>\n  StartServers 2\n  MinSpareServers 2\n  MaxSpareServers 4\n  MaxRequestWorkers %s\n  MaxConnectionsPerChild 500\n</IfModule>\n' "$workers" \
+    > /etc/apache2/conf-enabled/struct8-workers.conf.new &&
+    mv /etc/apache2/conf-enabled/struct8-workers.conf.new /etc/apache2/conf-enabled/struct8-workers.conf &&
+    log "apache: at most $workers processes"
+}
+apache_workers || log "apache: the processes stay at the image's default"
+
 tracing || log "tracing: could not be turned on; the site starts without it"
 
 case "$WP_AUTO_SETUP" in
