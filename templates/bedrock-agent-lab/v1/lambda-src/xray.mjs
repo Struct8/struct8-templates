@@ -12,8 +12,8 @@
 // The role already holds xray:PutTraceSegments, from the connection to the
 // X-Ray group. An invocation that is not sampled sends nothing.
 //
-// The same file is in every function folder that calls AWS, because the apply
-// zips each folder on its own.
+// Both functions import this one file; build.mjs puts a copy into each
+// function's bundle.
 
 import { randomBytes } from 'node:crypto';
 import { createSocket } from 'node:dgram';

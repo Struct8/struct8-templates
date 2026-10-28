@@ -1,0 +1,17 @@
+{
+  "name": "bedrock-agent-lab-lambdas",
+  "private": true,
+  "description": "Source of the bedrock-agent-lab functions; build.mjs writes what the diagram deploys into ../lambda/",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agentcore": "3.1158.0",
+    "@aws-sdk/client-bedrock-runtime": "3.1158.0",
+    "@aws-sdk/client-dynamodb": "3.1158.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}
