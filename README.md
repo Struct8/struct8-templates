@@ -89,15 +89,24 @@ who will never use it.
 A shared path becomes a dependency of many published template versions, none of which can
 be pinned. Copy the file into each template's tree instead.
 
-**5. Worker bundles are committed already built.**
+**5. Bundles are committed already built.**
 
 The engine performs a checkout, not a build. Nothing installs dependencies or runs a
 bundler in the customer's runner, so whatever is committed is what gets uploaded. If a
 worker has a `package.json` with a `build` script, CI rebuilds it and fails when the
 committed output differs.
 
-For Lambdas the opposite holds: commit the source directory and let the apply zip it, which
+For a Lambda with no dependency, commit the source directory and let the apply zip it, which
 keeps the diff readable.
+
+A Lambda that imports a package is built the same way as a worker: the source and a
+`package.json` with a `build` script sit in `v<n>/lambda-src/`, the build writes the function
+folder the diagram points at, and both are committed. CI rebuilds it and fails when the
+committed output differs. This includes the AWS SDK. The copy a Node.js runtime carries is
+replaced with every runtime version, and a function gets the current one each time it is
+updated: on 2026-10-28 a function of `bedrock-agent-lab` was created again in a runtime whose
+SDK lacked a command it had on 2026-10-06, and every request failed before the handler ran.
+A bundled SDK is the version in the lockfile, whatever the runtime carries.
 
 **6. Line endings are LF, enforced by `.gitattributes`.**
 
@@ -122,7 +131,7 @@ documents as a variable. Code that only works in one account is code a customer 
 | Workflow | What it refuses |
 |---|---|
 | `frozen-assets` | A pull request that modifies, deletes or renames a file under an existing `templates/<id>/v<n>/` folder, and a new file added at the repository root |
-| `worker-bundles` | A committed worker bundle that does not match what its source builds |
+| `worker-bundles` | A committed worker or Lambda bundle that does not match what its source builds |
 
 `frozen-assets` can be overridden with the `frozen-override` label on the pull request, for
 the case where a published version genuinely has to change — a leaked value, for instance.

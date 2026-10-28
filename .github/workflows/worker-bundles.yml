@@ -6,6 +6,10 @@ name: Worker bundles
 # dependencies or runs a bundler in the customer's runner, so a stale dist/ file
 # deploys and behaves like the previous version of the code -- with a green run
 # and a correct-looking diagram.
+#
+# The same holds for a Lambda whose source sits in a lambda-src/ folder with a
+# package.json: its build writes the function folders the diagram points at.
+# The workflow and job keep their names, which branch protection may require.
 
 on:
   pull_request:
@@ -27,19 +31,21 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Rebuild every worker and compare
+      - name: Rebuild every bundle and compare
         run: |
           set -euo pipefail
 
           # A worker with no package.json is a hand-written bundle: there is
-          # nothing to rebuild and nothing to compare it against.
+          # nothing to rebuild and nothing to compare it against. A Lambda with
+          # no lambda-src/ is plain source, zipped by the apply as it is.
           mapfile -t manifests < <(
-            find templates -type f -name package.json -path '*/worker/*' \
+            find templates -type f -name package.json \
+              \( -path '*/worker/*' -o -path '*/lambda-src/*' \) \
               -not -path '*/node_modules/*' 2>/dev/null | sort
           )
 
           if [ ${#manifests[@]} -eq 0 ]; then
-            echo "No worker with a package.json. Nothing to rebuild."
+            echo "No worker or lambda-src with a package.json. Nothing to rebuild."
             exit 0
           fi
 
