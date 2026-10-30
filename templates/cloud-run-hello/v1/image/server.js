@@ -8,7 +8,7 @@ const port = Number(process.env.PORT) || 8080;
 
 const server = http.createServer((req, res) => {
   const body = {
-    message: "Hello from Cloud Run",
+    message: "Hello from Cloud Run, v2",
     service: process.env.K_SERVICE ?? null,
     revision: process.env.K_REVISION ?? null,
     path: req.url,
