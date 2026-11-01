@@ -56,5 +56,5 @@ services:
         done
         bash /tmp/wp-auto-setup.sh || exit 1
         rm -f /tmp/wp-auto-setup.sh
-        unset WP_ADMIN_PASSWORD DB_ADMIN_USER DB_ADMIN_PASSWORD
+        unset WP_ADMIN_PASSWORD DB_ADMIN_USER DB_ADMIN_PASSWORD_B64
         exec docker-entrypoint.sh apache2-foreground
