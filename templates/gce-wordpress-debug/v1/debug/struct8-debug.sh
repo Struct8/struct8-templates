@@ -1,7 +1,9 @@
 #!/bin/sh
 # Struct8 debug access for Compute Engine (Linux).
-# Pulls one command at a time from a Pub/Sub subscription, runs it when the level in the
-# struct8-debug-level metadata key allows it, publishes the output and then acknowledges.
+# Pulls one command at a time from a Pub/Sub subscription, runs it when the granted level
+# allows it, publishes the output and then acknowledges. The level is the struct8-debug-level
+# metadata key of the VM, or, when the VM has a struct8-debug-level-key key, the project
+# metadata key that it names.
 # Needs sh, coreutils, sed and curl. Environment: STRUCT8_DEBUG_SUBSCRIPTION and
 # STRUCT8_DEBUG_OUTPUT_TOPIC, as projects/<project>/subscriptions|topics/<name>.
 #
@@ -9,7 +11,7 @@
 # another program, it writes that program over this file and runs it in its place, so an apply
 # with a new version takes effect without a reboot.
 
-VERSION=1.0.1-lab-repo
+VERSION=1.1.0-lab-repo
 
 MD=http://metadata.google.internal/computeMetadata/v1
 API=https://pubsub.googleapis.com/v1
@@ -39,15 +41,37 @@ matches() { printf '%s\n' "$2" | grep -Eq "$1"; }
 
 api() { curl -sS --max-time 70 -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' --data-binary "$2" "$API/$1"; }
 
+# Where the level is read, as a path under $MD. A VM of a managed instance group gets its
+# metadata from the group's instance template, and a template change reaches only the VMs the
+# group creates afterwards. The template therefore names, in struct8-debug-level-key, a project
+# metadata key that holds the level, and a change to that key reaches every VM of the group at
+# the next command. A failed read is retried: taking a missing key for a VM key would remove
+# the program from a VM of a group.
+LEVEL=instance/attributes/struct8-debug-level
+find_level() {
+  while :; do
+    key=$(md instance/attributes/struct8-debug-level-key)
+    case $? in
+      0)
+        if matches '^[A-Za-z0-9_-]{1,128}$' "$key"; then LEVEL="project/attributes/$key"; else
+          echo "struct8-debug: struct8-debug-level-key holds no metadata key name; reading the VM key" >&2
+        fi
+        return ;;
+      22) return ;;
+    esac
+    sleep 5
+  done
+}
+
 # The level key gone means the component was removed: the program removes itself. curl -f
 # exits with 22 on an HTTP error, which the metadata server returns as 404 for a missing key.
 removed() {
-  curl -sf -o /dev/null --max-time 10 -H 'Metadata-Flavor: Google' "$MD/instance/attributes/struct8-debug-level"
+  curl -sf -o /dev/null --max-time 10 -H 'Metadata-Flavor: Google' "$MD/$LEVEL"
   [ $? -eq 22 ]
 }
 
 uninstall() {
-  echo "struct8-debug: the struct8-debug-level key is gone; removing the debug program" >&2
+  echo "struct8-debug: the level key $LEVEL is gone; removing the debug program" >&2
   if command -v systemctl >/dev/null 2>&1; then
     systemctl disable struct8-debug.service >/dev/null 2>&1
     rm -f /etc/systemd/system/struct8-debug.service
@@ -175,7 +199,7 @@ handle() {
   REQ=$(printf '%s' "$RESP" | field request)
   matches '^[A-Za-z0-9._-]{1,64}$' "$REQ" || REQ=unknown
   mode=$(printf '%s' "$RESP" | field mode)
-  granted=$(md instance/attributes/struct8-debug-level)
+  granted=$(md "$LEVEL")
   if [ "$(rank "$mode")" -eq 0 ]; then
     refuse "unknown mode '$mode'" 2
   elif [ "$(rank "$mode")" -gt "$(rank "$granted")" ]; then
@@ -208,6 +232,7 @@ pause() {
 }
 
 INSTANCE=$(md instance/name)
+find_level
 while :; do
   removed && uninstall
   update
