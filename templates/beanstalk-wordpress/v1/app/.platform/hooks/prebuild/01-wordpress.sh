@@ -7,9 +7,10 @@
 #    AWS_EFS_FILE_SYSTEM_ID_0 names it; the diagram's connection from the
 #    environment to the file system writes it, and opens the NFS port.
 # 2. Writes /opt/struct8/wordpress.env, which only root reads, with:
-#      DB_ADMIN_USER, DB_ADMIN_PASSWORD  the master user, from the secret RDS manages
-#                                        (AWS_DB_INSTANCE_SECRET_ARN_0). Read again on
-#                                        every deployment, since RDS rotates it.
+#      DB_ADMIN_USER, DB_ADMIN_PASSWORD_B64  the master user, from the secret RDS manages
+#                                        (AWS_DB_INSTANCE_SECRET_ARN_0), the password in
+#                                        base64 because RDS may put a quote in it. Read
+#                                        again on every deployment, since RDS rotates it.
 #      WORDPRESS_DB_PASSWORD             the password of WordPress's own database user,
 #                                        generated on the first deployment and kept on
 #                                        EFS, outside the folder the site serves.
@@ -73,11 +74,11 @@ admin_password=$(aws ssm get-parameter --region "$region" --name "$admin_paramet
 mkdir -p /opt/struct8
 umask 077
 MASTER="$master" DB_PASSWORD="$(cat "$db_password")" ADMIN_PASSWORD="$admin_password" python3 - > /opt/struct8/wordpress.env.tmp <<'PY'
-import json, os
+import base64, json, os
 master = json.loads(os.environ["MASTER"])
 values = {
     "DB_ADMIN_USER": master["username"],
-    "DB_ADMIN_PASSWORD": master["password"],
+    "DB_ADMIN_PASSWORD_B64": base64.b64encode(master["password"].encode()).decode(),
     "WORDPRESS_DB_PASSWORD": os.environ["DB_PASSWORD"],
     "WP_ADMIN_PASSWORD": os.environ["ADMIN_PASSWORD"],
 }
