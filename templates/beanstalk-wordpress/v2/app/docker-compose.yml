@@ -1,0 +1,61 @@
+# WordPress on the Elastic Beanstalk Docker platform (Amazon Linux 2023).
+#
+# Elastic Beanstalk writes the environment properties into .env beside this file,
+# and compose reads them for the ${...} below. The diagram's connections write
+# them: AWS_DB_INSTANCE_*_0 from the connection to the RDS instance, and
+# AWS_EFS_FILE_SYSTEM_ID_0 and AWS_EFS_ACCESS_POINT_ID_0 from the connection to
+# the EFS file system.
+#
+# The prebuild hook (.platform/hooks/prebuild/) runs on the instance before this
+# starts: it mounts the EFS file system at /mnt/efs, through the access point when
+# there is one, and writes the database name and user and the passwords to
+# /opt/struct8/wordpress.env, read below. A value under `environment` would win
+# over that file, so the database name and user are not set there.
+#
+# The first start of a new site installs WordPress with the setup script of the
+# WordPress Professional template, downloaded from struct8-templates at a fixed
+# commit and checked against its SHA-256. The uploads are on EFS, the code on the
+# instance's disk; the script says how instances share the site.
+services:
+  wordpress:
+    image: public.ecr.aws/docker/library/wordpress:php8.4-apache
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    env_file:
+      - /opt/struct8/wordpress.env
+    environment:
+      WORDPRESS_DB_HOST: ${AWS_DB_INSTANCE_ENDPOINT_0}
+      # The address comes from the request: the environment's URL is known only
+      # after it exists. MySQL over TLS, without checking the certificate.
+      WORDPRESS_CONFIG_EXTRA: |
+        if (!empty($$_SERVER['HTTP_HOST'])) { define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']); define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']); }
+        define('DISALLOW_FILE_EDIT', true);
+        define('MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL | MYSQLI_CLIENT_SSL_DONT_VERIFY_SERVER_CERT);
+      WP_AUTO_SETUP: ${WP_AUTO_SETUP:-true}
+      WP_DEMO_CONTENT: ${WP_DEMO_CONTENT:-true}
+      WP_SITE_URL: ${WP_SITE_URL:-http://localhost}
+      WP_SITE_TITLE: ${WP_SITE_TITLE:-My WordPress site}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-wpadmin}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      WP_LOCALE: ${WP_LOCALE:-en_US}
+      WP_TIMEZONE: ${WP_TIMEZONE:-UTC}
+      APACHE_MAX_WORKERS: ${APACHE_MAX_WORKERS:-10}
+      WP_SETUP_URL: https://raw.githubusercontent.com/Struct8/struct8-templates/e6455bc1055981fb766f29f6b4ab156abb452e0e/templates/wordpress-professional/v1/container/wp-auto-setup.sh
+      WP_SETUP_SHA256: 36132da337afa6766531ff4fcbc5bc63a5ffb075974fbc1d75cd7656b80e62da
+    volumes:
+      - /mnt/efs/uploads:/var/www/html/wp-content/uploads
+      - ./db-bootstrap.php:/opt/struct8/db-bootstrap.php:ro
+    command:
+      - sh
+      - -c
+      - |
+        php /opt/struct8/db-bootstrap.php || echo "db-bootstrap: the database user was not updated"
+        n=0
+        until curl -fsSL -o /tmp/wp-auto-setup.sh "$$WP_SETUP_URL" && echo "$$WP_SETUP_SHA256  /tmp/wp-auto-setup.sh" | sha256sum -c -; do
+          n=$$((n + 1)); [ "$$n" -lt 6 ] || { echo "setup script: download failed"; exit 1; }; sleep 5
+        done
+        bash /tmp/wp-auto-setup.sh || exit 1
+        rm -f /tmp/wp-auto-setup.sh
+        unset WP_ADMIN_PASSWORD DB_ADMIN_USER DB_ADMIN_PASSWORD_B64
+        exec docker-entrypoint.sh apache2-foreground
