@@ -501,7 +501,8 @@ update_option( 'show_on_front', 'page' );
 update_option( 'page_on_front', $home_id );
 
 // The header's Navigation block has no menu of its own and shows the most recent one.
-$nav_link = fn( string $label, string $url ) => '<!-- wp:navigation-link ' . wp_json_encode( [ 'label' => $label, 'url' => $url, 'kind' => 'custom', 'isTopLevelLink' => true ] ) . ' /-->';
+// Unescaped JSON: wp_insert_post strips backslashes, which would turn í into u00ed.
+$nav_link = fn( string $label, string $url ) => '<!-- wp:navigation-link ' . wp_json_encode( [ 'label' => $label, 'url' => $url, 'kind' => 'custom', 'isTopLevelLink' => true ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES ) . ' /-->';
 $nav      = implode( "\n", [
 	$nav_link( 'Início', home_url( '/' ) ),
 	$nav_link( 'Loja', $shop_url ),
