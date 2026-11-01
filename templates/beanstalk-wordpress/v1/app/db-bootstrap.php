@@ -6,7 +6,7 @@
 // the first rotation. So WordPress logs in as its own user, WORDPRESS_DB_USER,
 // whose password is generated once and kept on the EFS file system by the
 // prebuild hook. This logs in as the master user (DB_ADMIN_USER and
-// DB_ADMIN_PASSWORD, read from the RDS secret by the same hook) and makes sure
+// DB_ADMIN_PASSWORD_B64, read from the RDS secret by the same hook) and makes sure
 // that user exists, with that password, over TLS, and with every privilege on the
 // site's database and no other.
 
@@ -25,7 +25,7 @@ $admin = null;
 for ($i = 1; $i <= 20 && $admin === null; $i++) {
     try {
         $c = mysqli_init();
-        $c->real_connect($host, getenv('DB_ADMIN_USER'), getenv('DB_ADMIN_PASSWORD'), '', $port, null,
+        $c->real_connect($host, getenv('DB_ADMIN_USER'), base64_decode((string) getenv('DB_ADMIN_PASSWORD_B64')), '', $port, null,
             MYSQLI_CLIENT_SSL | MYSQLI_CLIENT_SSL_DONT_VERIFY_SERVER_CERT);
         $admin = $c;
     } catch (mysqli_sql_exception $e) {
