@@ -1,0 +1,26 @@
+# Uptime Kuma on the Elastic Beanstalk Docker platform (Amazon Linux 2023), from
+# the image in the ECR repository the environment is connected to.
+#
+# Elastic Beanstalk writes the environment properties into .env beside this file,
+# and compose reads them for the ${...} below. AWS_ECR_REPOSITORY_URL_0 comes
+# from the connection to the ECR repository; Elastic Beanstalk logs in to ECR
+# with the instance profile, which that connection allows to pull.
+#
+# The prebuild hook (.platform/hooks/prebuild/) runs on the instance before this
+# starts: it mounts the EFS file system at /mnt/efs, through the access point
+# when there is one, and writes the database address, name and user and the
+# passwords to /opt/struct8/kuma.env, read below.
+#
+# Uptime Kuma runs on one instance only: give the environment a maximum of one.
+# The monitors and their history are in the RDS instance; /app/data keeps
+# Uptime Kuma's database settings and the files people upload, on EFS.
+services:
+  uptime-kuma:
+    image: ${AWS_ECR_REPOSITORY_URL_0}:latest
+    restart: unless-stopped
+    ports:
+      - "80:3001"
+    env_file:
+      - /opt/struct8/kuma.env
+    volumes:
+      - /mnt/efs/data:/app/data

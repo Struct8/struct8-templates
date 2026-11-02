@@ -1,0 +1,46 @@
+# WordPress on the Elastic Beanstalk Docker platform (Amazon Linux 2023), from
+# the image in the ECR repository the environment is connected to.
+#
+# Elastic Beanstalk writes the environment properties into .env beside this file,
+# and compose reads them for the ${...} below. The diagram's connections write
+# them: AWS_ECR_REPOSITORY_URL_0 from the connection to the ECR repository,
+# AWS_DB_INSTANCE_*_0 from the connection to the RDS instance, and
+# AWS_EFS_FILE_SYSTEM_ID_0 and AWS_EFS_ACCESS_POINT_ID_0 from the connection to
+# the EFS file system. Elastic Beanstalk logs in to ECR with the instance
+# profile, which the connection to the repository allows to pull.
+#
+# The image (../image/) carries the database bootstrap and the setup script of
+# the WordPress Professional template, so the instance downloads nothing at
+# start. The prebuild hook (.platform/hooks/prebuild/) runs on the instance
+# before this starts: it mounts the EFS file system at /mnt/efs, through the
+# access point when there is one, and writes the database name and user and the
+# passwords to /opt/struct8/wordpress.env, read below. A value under
+# `environment` would win over that file, so the database name and user are not
+# set there.
+services:
+  wordpress:
+    image: ${AWS_ECR_REPOSITORY_URL_0}:latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    env_file:
+      - /opt/struct8/wordpress.env
+    environment:
+      WORDPRESS_DB_HOST: ${AWS_DB_INSTANCE_ENDPOINT_0}
+      # The address comes from the request: the environment's URL is known only
+      # after it exists. MySQL over TLS, without checking the certificate.
+      WORDPRESS_CONFIG_EXTRA: |
+        if (!empty($$_SERVER['HTTP_HOST'])) { define('WP_HOME', 'http://' . $$_SERVER['HTTP_HOST']); define('WP_SITEURL', 'http://' . $$_SERVER['HTTP_HOST']); }
+        define('DISALLOW_FILE_EDIT', true);
+        define('MYSQL_CLIENT_FLAGS', MYSQLI_CLIENT_SSL | MYSQLI_CLIENT_SSL_DONT_VERIFY_SERVER_CERT);
+      WP_AUTO_SETUP: ${WP_AUTO_SETUP:-true}
+      WP_DEMO_CONTENT: ${WP_DEMO_CONTENT:-true}
+      WP_SITE_URL: ${WP_SITE_URL:-http://localhost}
+      WP_SITE_TITLE: ${WP_SITE_TITLE:-My WordPress site}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-wpadmin}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      WP_LOCALE: ${WP_LOCALE:-en_US}
+      WP_TIMEZONE: ${WP_TIMEZONE:-UTC}
+      APACHE_MAX_WORKERS: ${APACHE_MAX_WORKERS:-10}
+    volumes:
+      - /mnt/efs/uploads:/var/www/html/wp-content/uploads
