@@ -8,9 +8,13 @@ instances serve the same site.
 |---|---|
 | v1 | `v1/` |
 | v2 | `v2/` |
+| v3 | `v3/` |
 
 `v2/` mounts the file system through the access point of the environment's connection to it,
 and lets two environments share one RDS instance and one file system.
+
+`v3/` runs each environment from an image in Amazon ECR, and replaces the second WordPress
+site with Uptime Kuma. See "Images in ECR (`v3/`)" below.
 
 ## What the code is
 
@@ -65,3 +69,28 @@ password on every deployment, so two sites with the same user would overwrite ea
 A deployment never swaps a mount the running site holds. Moving an environment from the root
 of the file system to an access point takes new instances: rebuild the environment, or
 replace its instances.
+
+## Images in ECR (`v3/`)
+
+`v3/` has two applications, each with an `image/` folder and an `app/` folder:
+
+| Folder | What it is |
+|---|---|
+| `v3/wordpress/image/` | The WordPress image: the official image plus `db-bootstrap.php`, the setup script of `wordpress-professional` (copied at commit `e6455bc1055981fb766f29f6b4ab156abb452e0e`, same SHA-256) and `start.sh` |
+| `v3/wordpress/app/` | The WordPress source bundle: `docker-compose.yml` pulls the image, and the prebuild hook is the one of `v2/` |
+| `v3/kuma/image/` | The Uptime Kuma image, `louislam/uptime-kuma:2.5.6`, plus the certificate bundle of Amazon RDS, `db-bootstrap.js` and `start.sh` |
+| `v3/kuma/app/` | The Uptime Kuma source bundle: `docker-compose.yml` and a prebuild hook that mounts EFS and writes the database settings |
+
+On the diagram, each `image/` folder is the `image_path_` of an ECR repository connected to the
+GitHub node, and each `app/` folder is the `file_path_` of an environment. The environment is
+connected to its repository: the apply builds the image for the architecture of the
+environment's instance type and pushes it as `latest` before the environment is created, the
+instance role may pull it, and `AWS_ECR_REPOSITORY_URL_0` names it in `docker-compose.yml`.
+The setup script is in the image, so an instance downloads nothing from GitHub at start.
+
+Uptime Kuma keeps its monitors in the RDS instance, which is MariaDB in `v3/`: Uptime Kuma
+supports MariaDB as an external database, and its documentation does not support SQLite on a
+network file system such as EFS. Its own database user and password are made the same way as
+WordPress's (properties `KUMA_DB_NAME` and `KUMA_DB_USER`, default `uptime_kuma`). Uptime Kuma
+runs on one instance: give its environment a maximum of one. It has no administrator until
+somebody opens it: open its address right after the apply and create the administrator.
