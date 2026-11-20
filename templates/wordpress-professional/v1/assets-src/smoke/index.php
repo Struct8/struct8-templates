@@ -3,11 +3,15 @@
 // on a site: wp_initial_constants() opens the request span of the WordPress
 // instrumentation, and WP::main() is one of the steps it traces under it.
 //
-// The page also writes, for the test's log, which span is current before and
-// after wp_initial_constants(), and runs the steps of the instrumentation's
-// hook directly, so a failed run says where the request span was lost.
+// wp_initial_constants() must do something. The WordPress image turns opcache
+// on, and its optimizer replaces the call to a function with an empty body by
+// the function's return value: the function never runs, and no hook on it
+// fires. On a site the function defines a page of constants.
 function wp_initial_constants(): void
 {
+    if (!defined('SMOKE_INITIAL_CONSTANTS')) {
+        define('SMOKE_INITIAL_CONSTANTS', true);
+    }
 }
 
 class WP
@@ -18,6 +22,8 @@ class WP
     }
 }
 
+// For the test's log: the request span is the current span once
+// wp_initial_constants() has run.
 function smoke_current(string $when): void
 {
     if (!class_exists(\OpenTelemetry\API\Trace\Span::class)) {
@@ -26,23 +32,10 @@ function smoke_current(string $when): void
     }
     $span = \OpenTelemetry\API\Trace\Span::getCurrent();
     $name = $span instanceof \OpenTelemetry\SDK\Trace\ReadableSpanInterface ? $span->getName() : get_class($span);
-    echo "$when: current span $name ", $span->getContext()->getSpanId(), "\n";
+    echo "$when: current span $name\n";
 }
 
 smoke_current('before wp_initial_constants');
 wp_initial_constants();
 smoke_current('after wp_initial_constants');
 (new WP())->main();
-
-try {
-    $factory = new \Nyholm\Psr7\Factory\Psr17Factory();
-    $request = (new \Nyholm\Psr7Server\ServerRequestCreator($factory, $factory, $factory, $factory))->fromGlobals();
-    echo "request: ", $request->getMethod(), " ", $request->getServerParams()['SCRIPT_NAME'] ?? '-', "\n";
-    $parent = \OpenTelemetry\API\Globals::propagator()->extract($request->getHeaders());
-    echo "propagator: ", get_class(\OpenTelemetry\API\Globals::propagator()), "\n";
-    echo "registered hooks file: ", in_array(true, array_map(static fn ($f) => str_contains($f, 'auto-wordpress/_register.php'), get_included_files()), true) ? 'yes' : 'no', "\n";
-    echo "disabled: ", var_export(\OpenTelemetry\SDK\Sdk::isInstrumentationDisabled('wordpress'), true), "\n";
-    echo "ini: validate_hook_functions=", ini_get('opentelemetry.validate_hook_functions'), " conflicts=", ini_get('opentelemetry.conflicts'), "\n";
-} catch (\Throwable $e) {
-    echo "the instrumentation's steps throw: ", get_class($e), ": ", $e->getMessage(), " at ", $e->getFile(), ":", $e->getLine(), "\n";
-}

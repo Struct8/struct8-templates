@@ -20,20 +20,28 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=versions.env
 . "$here/versions.env"
 
-# ECR Public throttles anonymous pulls and answers "toomanyrequests: Rate
-# exceeded" for a while; a pull tried again a little later goes through.
+# ECR Public throttles anonymous pulls: "toomanyrequests: Rate exceeded" for a
+# while, and "Data limit exceeded" for the rest of the period. Docker Hub
+# serves the same image index under the same digest, so a pull from there runs
+# exactly the same image. RUN_IMAGE is whichever of the two was pulled.
 pull_image() {
-  docker image inspect "$WORDPRESS_IMAGE" >/dev/null 2>&1 && return 0
-  for wait in 15 30 60 120; do
-    docker pull -q "$WORDPRESS_IMAGE" && return 0
-    echo "could not pull the WordPress image; trying again in ${wait}s"
-    sleep "$wait"
+  local digest=${WORDPRESS_IMAGE##*@}
+  local hub=docker.io/library/wordpress@$digest
+  for image in "$WORDPRESS_IMAGE" "$hub"; do
+    if docker image inspect "$image" >/dev/null 2>&1; then RUN_IMAGE=$image; return 0; fi
   done
-  docker pull "$WORDPRESS_IMAGE"
+  for wait in 15 30 60 0; do
+    for image in "$WORDPRESS_IMAGE" "$hub"; do
+      if docker pull -q "$image"; then RUN_IMAGE=$image; return 0; fi
+      echo "could not pull $image"
+    done
+    [ "$wait" -gt 0 ] && { echo "trying again in ${wait}s"; sleep "$wait"; }
+  done
+  echo "the WordPress image could not be pulled from ECR Public or Docker Hub"
+  exit 1
 }
 
 in_image() {
-  pull_image
   docker run --rm -e HOME=/tmp "$@"
 }
 
@@ -43,12 +51,14 @@ fetch() { # url sha256 file
   echo "$2  $3" | sha256sum -c -
 }
 
+case "${1:-}" in extension | assemble | smoke) pull_image ;; esac
+
 case "${1:-}" in
   extension)
     out=$(realpath -m "$2")
     work=$(mktemp -d)
     fetch "https://pecl.php.net/get/opentelemetry-$OTEL_EXTENSION_VERSION.tgz" "$OTEL_EXTENSION_SHA256" "$work/opentelemetry.tgz"
-    in_image -v "$work:/work" "$WORDPRESS_IMAGE" sh -euc '
+    in_image -v "$work:/work" "$RUN_IMAGE" sh -euc '
       api=$(basename "$(php -r "echo PHP_EXTENSION_DIR;")")
       [ "$api" = "$0" ] || { echo "the image has the extension API $api, versions.env says $0"; exit 1; }
       mkdir /tmp/src
@@ -84,7 +94,7 @@ case "${1:-}" in
     # and leaves it next to the archive: commit it, and every later build
     # installs exactly it.
     if [ -f "$work/src/composer.lock" ]; then verb=install; else verb=update; fi
-    in_image -v "$work:/work" -w /work/src "$WORDPRESS_IMAGE" sh -euc '
+    in_image -v "$work:/work" -w /work/src "$RUN_IMAGE" sh -euc '
       COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_HOME=/tmp/composer php /work/composer.phar "$0" \
         --no-dev --no-interaction --no-progress --ignore-platform-req=ext-opentelemetry
       chown -R "$1" /work/src
@@ -129,7 +139,7 @@ case "${1:-}" in
       "$here/../container/wp-auto-setup.sh" > "$work/assets/tracing/bootstrap.php"
     head -1 "$work/assets/tracing/bootstrap.php" | grep -qx '<?php' || { echo "could not cut the bootstrap out of wp-auto-setup.sh"; exit 1; }
     cp "$here/smoke/index.php" "$here/smoke/receiver.php" "$work/site/"
-    in_image -v "$work/assets:/opt/struct8-assets:ro" -v "$work/site:/var/www/html" "$WORDPRESS_IMAGE" bash -euc '
+    in_image -v "$work/assets:/opt/struct8-assets:ro" -v "$work/site:/var/www/html" "$RUN_IMAGE" bash -euc '
       ext=/opt/struct8-assets/tracing/ext/$(uname -m)/opentelemetry.so
       [ "$(basename "$(php -r "echo PHP_EXTENSION_DIR;")")" = "$(cat /opt/struct8-assets/tracing/ext/api)" ]
       # A hook that throws is skipped in silence unless display_warnings is on:
