@@ -37,8 +37,9 @@ in_image() {
   docker run --rm -e HOME=/tmp "$@"
 }
 
+# pecl.php.net answers 500 for minutes at a time: wait up to five minutes.
 fetch() { # url sha256 file
-  curl -fsSL --retry 3 -o "$3" "$1"
+  curl -fsSL --retry 10 --retry-delay 20 --retry-max-time 300 --retry-all-errors -o "$3" "$1"
   echo "$2  $3" | sha256sum -c -
 }
 
