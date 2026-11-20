@@ -20,7 +20,20 @@ here=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=versions.env
 . "$here/versions.env"
 
+# ECR Public throttles anonymous pulls and answers "toomanyrequests: Rate
+# exceeded" for a while; a pull tried again a little later goes through.
+pull_image() {
+  docker image inspect "$WORDPRESS_IMAGE" >/dev/null 2>&1 && return 0
+  for wait in 15 30 60 120; do
+    docker pull -q "$WORDPRESS_IMAGE" && return 0
+    echo "could not pull the WordPress image; trying again in ${wait}s"
+    sleep "$wait"
+  done
+  docker pull "$WORDPRESS_IMAGE"
+}
+
 in_image() {
+  pull_image
   docker run --rm -e HOME=/tmp "$@"
 }
 
