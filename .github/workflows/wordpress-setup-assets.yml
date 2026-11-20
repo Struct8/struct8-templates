@@ -109,6 +109,8 @@ jobs:
     name: Traced request (${{ matrix.arch }})
     needs: assemble
     strategy:
+      # One architecture failing must not cancel the other: each says what it got.
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04-arm
