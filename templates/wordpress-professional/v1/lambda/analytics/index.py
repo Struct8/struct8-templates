@@ -13,23 +13,12 @@ Environment (set on the function by the template):
 
 Nothing the caller sends reaches the SQL: the period is picked from a fixed list and
 every other value in a query is a number or a date computed here.
-
-Tracing: with active tracing on the function, each Athena query and the DynamoDB scan
-are sent to X-Ray as subsegments of the invocation. When the request came through the
-CDN with the headers of the viewer-request function (X-Amzn-Trace-Id, X-Request-Start,
-X-Cdn-Distribution-Id) and the invocation joined that trace, a segment for the
-distribution is sent too, so the trace starts at CloudFront.
 """
 
 import hmac
 import html
-import json
 import os
-import re
-import secrets
-import threading
 import time
-from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -56,7 +45,6 @@ CSP_DAYS = {"1h": 1, "24h": 2, "7d": 7}
 CSP_TABLE_NAME = os.environ.get("AWS_DYNAMODB_TABLE_NAME_0", "")
 
 athena = boto3.client("athena")
-xray = boto3.client("xray")
 _cache = {}
 _csp_table = None
 
@@ -134,123 +122,6 @@ TEXT = {
 }
 
 
-# --------------------------------------------------------------------------- tracing
-
-# The trace of the current invocation: {"root", "parent"} when it is sampled, else empty.
-_trace = {}
-_spans = []
-_spans_lock = threading.Lock()
-
-# How long before its arrival here a request may have left the CDN and still be drawn.
-EDGE_WINDOW_SECONDS = 60
-DISTRIBUTION_ID = re.compile(r"[A-Z0-9]{6,32}")
-SEGMENT_ID = re.compile(r"[0-9a-f]{16}")
-REQUEST_START = re.compile(r"t=(\d{10,16})")
-
-
-def trace_fields(value):
-    """Root, Parent and Sampled of an X-Amzn-Trace-Id value, as a dict."""
-    fields = {}
-    for part in (value or "").split(";"):
-        name, _, field = part.strip().partition("=")
-        if name:
-            fields[name] = field
-    return fields
-
-
-def begin_trace():
-    """Read the invocation's trace from the runtime and drop what the last one left."""
-    _trace.clear()
-    with _spans_lock:
-        _spans.clear()
-    fields = trace_fields(os.environ.get("_X_AMZN_TRACE_ID"))
-    if fields.get("Sampled") == "1" and fields.get("Root") and fields.get("Parent"):
-        _trace.update(root=fields["Root"], parent=fields["Parent"])
-
-
-@contextmanager
-def traced_call(name, **aws):
-    """Record the block as one subsegment of the invocation, named after what it calls."""
-    start = time.time()
-    error = None
-    try:
-        yield
-    except Exception as raised:
-        error = raised
-        raise
-    finally:
-        trace = dict(_trace)
-        if trace:
-            document = {
-                "name": name,
-                "id": secrets.token_hex(8),
-                "trace_id": trace["root"],
-                "parent_id": trace["parent"],
-                "type": "subsegment",
-                "namespace": "remote",
-                "start_time": start,
-                "end_time": time.time(),
-                "aws": aws,
-            }
-            if error is not None:
-                document["fault"] = True
-                document["cause"] = {"exceptions": [{"type": type(error).__name__, "message": str(error)[:500]}]}
-            with _spans_lock:
-                _spans.append(document)
-
-
-def edge_segment(headers, method, path, status, arrived):
-    """The CloudFront segment the invocation hangs from, or None.
-
-    The viewer-request function opens the trace: X-Amzn-Trace-Id carries its Root and,
-    as Parent, the id this segment takes. The segment is sent only when the invocation
-    joined that same trace, the time the request left the CDN is plausible and the
-    distribution id is well formed.
-    """
-    if not _trace:
-        return None
-    sent = trace_fields(headers.get("x-amzn-trace-id"))
-    if sent.get("Root") != _trace["root"] or not SEGMENT_ID.fullmatch(sent.get("Parent", "")):
-        return None
-    start = REQUEST_START.fullmatch(headers.get("x-request-start", ""))
-    distribution = headers.get("x-cdn-distribution-id", "")
-    if not start or not DISTRIBUTION_ID.fullmatch(distribution):
-        return None
-    left = int(start.group(1)) / 1000
-    if not arrived - EDGE_WINDOW_SECONDS < left < arrived + 1:
-        return None
-    return {
-        "name": distribution,
-        "id": sent["Parent"],
-        "trace_id": _trace["root"],
-        "start_time": min(left, arrived),
-        "end_time": time.time(),
-        "http": {"request": {"method": method, "url": path}, "response": {"status": status}},
-        "annotations": {"cloudfront_distribution_id": distribution},
-    }
-
-
-def send_trace(edge=None):
-    """Send what this invocation recorded. A failure here never reaches the page."""
-    with _spans_lock:
-        documents = list(_spans)
-        _spans.clear()
-    if edge:
-        documents.append(edge)
-    if not documents:
-        return
-    try:
-        # PutTraceSegments takes at most 50 documents per call
-        for first in range(0, len(documents), 50):
-            answer = xray.put_trace_segments(
-                TraceSegmentDocuments=[json.dumps(d) for d in documents[first : first + 50]]
-            )
-            for refused in answer.get("UnprocessedTraceSegments", []):
-                print(f"X-Ray refused segment {refused.get('Id')}: {refused.get('ErrorCode')} {refused.get('Message')}")
-    except Exception as error:
-        print(f"X-Ray segments not sent: {error}")
-
-
 # --------------------------------------------------------------------------- queries
 
 
@@ -325,11 +196,6 @@ def queries(period, now):
 
 def run_query(sql):
     """Run one query and return its rows as dicts of strings, or raise."""
-    with traced_call(WORKGROUP, operation="StartQueryExecution", workgroup=WORKGROUP):
-        return _run_query(sql)
-
-
-def _run_query(sql):
     execution = athena.start_query_execution(QueryString=sql, WorkGroup=WORKGROUP)
     query_id = execution["QueryExecutionId"]
     deadline = time.time() + QUERY_TIMEOUT_SECONDS
@@ -675,8 +541,7 @@ def csp_counters(days, now):
     counters = []
     kwargs = {}
     while True:
-        with traced_call(CSP_TABLE_NAME, operation="Scan", table_name=CSP_TABLE_NAME):
-            page_ = csp_table().scan(**kwargs)
+        page_ = csp_table().scan(**kwargs)
         for item in page_.get("Items", []):
             day = item["pk"].split("#", 1)[0]
             if day in wanted and int(item.get("expires_at", 0)) > now:
@@ -764,18 +629,8 @@ def reply(status, body, content_type="text/html; charset=utf-8", cache="no-store
 
 
 def handler(event, context):
-    arrived = time.time()
-    begin_trace()
-    headers = event.get("headers") or {}
-    http = (event.get("requestContext") or {}).get("http") or {}
-    answer = respond(event, headers)
-    edge = edge_segment(headers, http.get("method", "GET"), event.get("rawPath", "/"), answer["statusCode"], arrived)
-    send_trace(edge)
-    return answer
-
-
-def respond(event, headers):
     params = event.get("queryStringParameters") or {}
+    headers = event.get("headers") or {}
 
     lang = params.get("lang") or ("pt" if headers.get("accept-language", "").lower().startswith("pt") else "en")
     if lang not in TEXT:
