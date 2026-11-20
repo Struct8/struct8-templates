@@ -132,7 +132,9 @@ case "${1:-}" in
     in_image -v "$work/assets:/opt/struct8-assets:ro" -v "$work/site:/var/www/html" "$WORDPRESS_IMAGE" bash -euc '
       ext=/opt/struct8-assets/tracing/ext/$(uname -m)/opentelemetry.so
       [ "$(basename "$(php -r "echo PHP_EXTENSION_DIR;")")" = "$(cat /opt/struct8-assets/tracing/ext/api)" ]
-      echo "extension=$ext" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini
+      # A hook that throws is skipped in silence unless display_warnings is on:
+      # the test turns it on, so such a failure reaches the log and fails here.
+      printf "extension=%s\nopentelemetry.display_warnings=On\nlog_errors=On\n" "$ext" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini
       echo "php_admin_value auto_prepend_file /opt/struct8-assets/tracing/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf
       php -r "exit(extension_loaded(\"opentelemetry\") ? 0 : 1);" || { echo "the extension does not load"; exit 1; }
       php /opt/struct8-assets/wp-cli.phar --allow-root --version
