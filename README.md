@@ -126,16 +126,34 @@ If a bootstrap script needs a hostname, a bucket name or a region, it reads it f
 metadata, from an environment variable the template sets, or from a value the template
 documents as a variable. Code that only works in one account is code a customer cannot use.
 
+**9. A download names one version.**
+
+A template is applied months after it is published, by people who never read its code, and
+nobody maintains it in between. Whatever a script downloads when it runs is whatever is
+newest at that moment: an image tagged `latest`, a file at the top of a branch, a package
+with no version. On 2026-11-20 a release of `open-telemetry/opentelemetry-auto-wordpress`
+that refers to a class it never imports stopped the WordPress request spans of
+WordPress Professional, with no change in this repository.
+
+So an image names a tag and its digest, a release names its number and is checked against a
+checksum, and a package manager installs from a lockfile. Better still, build it here and
+commit the result, as WordPress Professional does with `wp-setup-assets.tar.gz`: then the
+customer's account downloads nothing from a third party at all. CI refuses an added line that
+downloads a moving version.
+
 ## Checks
 
 | Workflow | What it refuses |
 |---|---|
 | `frozen-assets` | A pull request that modifies, deletes or renames a file under an existing `templates/<id>/v<n>/` folder, and a new file added at the repository root |
 | `worker-bundles` | A committed worker or Lambda bundle that does not match what its source builds |
+| `pinned-versions` | An added line under `templates/` that downloads `latest`, the newest release, a file at the top of a branch, a PECL package with no version, or runs `composer require`, `pip install` or `npm install` without a version |
+| `wordpress-setup-assets` | A WordPress Professional setup archive that does not match `assets-src/`, or that does not trace a request in the WordPress image on arm64 and x86-64 |
 
 `frozen-assets` can be overridden with the `frozen-override` label on the pull request, for
 the case where a published version genuinely has to change — a leaked value, for instance.
-Say in the pull request why.
+Say in the pull request why. `pinned-versions` has the `unpinned-override` label, for the
+rare template whose point is to run the newest version.
 
 ## Adding a template's assets
 

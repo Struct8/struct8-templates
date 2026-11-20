@@ -33,8 +33,8 @@
 # and no read of data. With the volume mounted at /var/www/html/wp-content/uploads
 # instead, this script keeps the code on the container's own disk and the volume
 # holds what has to be shared: the uploads, the keys of wp-config.php, the
-# plugins the first start installed (as one archive each), the tracing build and
-# the setup markers, all under uploads/.struct8. The section "Code on the
+# plugins the first start installed (as one archive each) and the setup markers,
+# all under uploads/.struct8. The section "Code on the
 # container's disk" below says how each start rebuilds the site from that.
 # Mounted at /var/www/html, everything works as it always did.
 
@@ -61,6 +61,64 @@ fi
 printf 'opcache.max_accelerated_files=%s\n' "${OPCACHE_MAX_FILES:-20000}" > /usr/local/etc/php/conf.d/zz-struct8-opcache.ini ||
   log "opcache: the file limit stays at the image's default"
 
+# --- Setup assets --------------------------------------------------------------
+# What this script runs that the image does not carry: WP-CLI and, for tracing,
+# the OpenTelemetry PHP extension and the PHP libraries. They are one archive,
+# wp-setup-assets.tar.gz, built in the template's repository from the exact
+# versions in assets-src/versions.env and assets-src/composer.lock, and published
+# by the template next to this script. WP_SETUP_ASSETS_BUCKET, WP_SETUP_ASSETS_KEY
+# and WP_SETUP_ASSETS_ETAG name it, the way WP_SETUP_SCRIPT_* name this script.
+#
+# Each start downloads it with the task's credentials, compares its MD5 with the
+# ETag and unpacks it in /opt/struct8-assets. Nothing comes from PECL, Packagist
+# or GitHub when a task starts: a new release of the extension, of a library or
+# of WP-CLI changes nothing on a site, and neither does one of those sites being
+# down.
+#
+# The extension is compiled for the PHP of one image, the WordPress image named
+# in assets-src/versions.env, which is also the image of the template's task
+# definition. In an image with another PHP the extension does not load, and the
+# site starts without tracing.
+ASSETS=/opt/struct8-assets
+
+assets_download() {
+  creds=$(curl -fsS "http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") || return 1
+  field() { printf '%s' "$creds" | grep -o "\"$1\":\"[^\"]*" | cut -d'"' -f4; }
+  region=${REGION:-$AWS_REGION}
+  curl -fsS --retry 2 --aws-sigv4 "aws:amz:$region:s3" --user "$(field AccessKeyId):$(field SecretAccessKey)" \
+    -H "x-amz-security-token: $(field Token)" -o "$1" \
+    "https://$WP_SETUP_ASSETS_BUCKET.s3.$region.amazonaws.com/$WP_SETUP_ASSETS_KEY"
+}
+
+assets_fetch() {
+  if [ -z "$WP_SETUP_ASSETS_BUCKET" ] || [ -z "$WP_SETUP_ASSETS_KEY" ] || [ -z "$WP_SETUP_ASSETS_ETAG" ]; then
+    log "assets: WP_SETUP_ASSETS_BUCKET, WP_SETUP_ASSETS_KEY or WP_SETUP_ASSETS_ETAG is empty"
+    return 1
+  fi
+  [ "$(cat "$ASSETS/.etag" 2>/dev/null)" = "$WP_SETUP_ASSETS_ETAG" ] && return 0
+  archive=$(mktemp) || return 1
+  n=0
+  until assets_download "$archive" && [ "$(md5sum < "$archive" | cut -d' ' -f1)" = "$WP_SETUP_ASSETS_ETAG" ]; do
+    n=$((n + 1))
+    if [ "$n" -ge 6 ]; then
+      rm -f "$archive"
+      log "assets: could not download s3://$WP_SETUP_ASSETS_BUCKET/$WP_SETUP_ASSETS_KEY with the ETag $WP_SETUP_ASSETS_ETAG"
+      return 1
+    fi
+    sleep 5
+  done
+  rm -rf "$ASSETS.new" &&
+    mkdir -p "$ASSETS.new" &&
+    tar -xzf "$archive" -C "$ASSETS.new" &&
+    printf '%s\n' "$WP_SETUP_ASSETS_ETAG" > "$ASSETS.new/.etag" &&
+    rm -rf "$ASSETS" &&
+    mv "$ASSETS.new" "$ASSETS"
+  status=$?
+  rm -f "$archive"
+  [ "$status" -eq 0 ] && log "assets: $(cat "$ASSETS/VERSIONS" 2>/dev/null | tr '\n' ' ')"
+  return $status
+}
+
 # --- Tracing -------------------------------------------------------------------
 # With WP_TRACING=true, each web request becomes a trace: the WordPress request,
 # its database queries and its Redis commands, up to 10 spans for the same query
@@ -85,13 +143,9 @@ printf 'opcache.max_accelerated_files=%s\n' "${OPCACHE_MAX_FILES:-20000}" > /usr
 # script only reads the headers.
 #
 # It runs on every start, before the setup below, and it never stops the site:
-# when a step fails, the site starts without tracing.
-#
-# The PHP extension and the PHP libraries are built once per site and kept on
-# the EFS volume, in .struct8-tracing. Every container starts from the clean
-# image, so each start points PHP at them again, which is two small files. The
-# first start builds them in the background, and Apache reloads when they are
-# ready. An image with another PHP version builds the extension again, once.
+# when a step fails, the site starts without tracing. The extension and the
+# libraries come from the setup assets above, and each start points PHP at them,
+# which is two small files.
 #
 # Query text goes out without its values: the strings and numbers of each query
 # become `?`. Health checks of the load balancer are not traced.
@@ -101,110 +155,20 @@ printf 'opcache.max_accelerated_files=%s\n' "${OPCACHE_MAX_FILES:-20000}" > /usr
 #   OTEL_EXPORTER_OTLP_ENDPOINT  default http://127.0.0.1:4318
 #   OTEL_TRACES_SAMPLER_ARG      share of the requests traced, 0 to 1, default 1
 #
-# Turning it off: WP_TRACING=false. The files stay on the volume and are no
-# longer loaded.
+# Turning it off: WP_TRACING=false.
 #
-# With the code on the container's disk, the build stays on the volume and each
-# start copies the extension, the libraries and the bootstrap to /opt/struct8-tracing:
-# the libraries are hundreds of PHP files that PHP opens on every request.
-if [ "$LOCAL_CODE" = yes ]; then
-  TRACING=$STATE/tracing
-  TRACING_RUN=/opt/struct8-tracing
-else
-  TRACING=$SITE/.struct8-tracing
-  TRACING_RUN=$TRACING
-fi
-
-tracing_ready() {
-  [ -f "$TRACING/ext/$1/opentelemetry.so" ] && [ -f "$TRACING/vendor/autoload.php" ]
-}
+# Earlier versions of this script built the extension and the libraries on the
+# EFS volume, in .struct8-tracing or uploads/.struct8/tracing. This version does
+# not read that folder.
+TRACING=$ASSETS/tracing
 
 # The two configuration files of this container. The extension loads in every
 # PHP process; the bootstrap only in Apache, so WP-CLI below runs untraced.
 tracing_turn_on() {
-  if [ "$TRACING_RUN" != "$TRACING" ]; then
-    mkdir -p "$TRACING_RUN/ext/$1" &&
-      cp "$TRACING/ext/$1/opentelemetry.so" "$TRACING_RUN/ext/$1/opentelemetry.so" &&
-      cp -R "$TRACING/vendor" "$TRACING_RUN/vendor" &&
-      cp "$TRACING/bootstrap.php" "$TRACING_RUN/bootstrap.php" || return 1
-  fi
-  printf 'extension=%s\n' "$TRACING_RUN/ext/$1/opentelemetry.so" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new &&
+  printf 'extension=%s\n' "$1" > /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new &&
     mv /usr/local/etc/php/conf.d/zz-struct8-tracing.ini.new /usr/local/etc/php/conf.d/zz-struct8-tracing.ini &&
-    printf 'php_admin_value auto_prepend_file %s\n' "$TRACING_RUN/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf.new &&
+    printf 'php_admin_value auto_prepend_file %s\n' "$TRACING/bootstrap.php" > /etc/apache2/conf-enabled/struct8-tracing.conf.new &&
     mv /etc/apache2/conf-enabled/struct8-tracing.conf.new /etc/apache2/conf-enabled/struct8-tracing.conf
-}
-
-# Builds what is missing. Two tasks start together on a new site: one builds,
-# the other waits for the files.
-tracing_build() {
-  lock=$TRACING/build-lock
-  waited=0
-  until mkdir "$lock" 2>/dev/null; do
-    if tracing_ready "$1"; then return 0; fi
-    if [ "$waited" -ge 900 ]; then
-      log "tracing: the build lock is 15 minutes old: taking it over"
-      rmdir "$lock" 2>/dev/null
-      waited=0
-    else
-      sleep 10
-      waited=$((waited + 10))
-    fi
-  done
-  tracing_build_locked "$1"
-  status=$?
-  rmdir "$lock" 2>/dev/null
-  return $status
-}
-
-tracing_build_locked() {
-  tracing_ready "$1" && return 0
-  work=$(mktemp -d) || return 1
-  rm -rf "$TRACING"/vendor.new.* "$TRACING"/ext/*/opentelemetry.so.new.*
-  so=$TRACING/ext/$1/opentelemetry.so
-  if [ ! -f "$so" ]; then
-    # The official image keeps the compiler; an image without it gets it here.
-    if ! command -v phpize >/dev/null || ! command -v gcc >/dev/null || ! command -v make >/dev/null || ! command -v autoconf >/dev/null; then
-      { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $PHPIZE_DEPS; } >"$work/apt.log" 2>&1 ||
-        { tail -5 "$work/apt.log"; rm -rf "$work"; return 1; }
-    fi
-    printf '\n' | pecl install -f opentelemetry >"$work/pecl.log" 2>&1 || { tail -5 "$work/pecl.log"; rm -rf "$work"; return 1; }
-    mkdir -p "$TRACING/ext/$1" &&
-      cp "$(php -r 'echo PHP_EXTENSION_DIR;')/opentelemetry.so" "$so.new.$$" && mv "$so.new.$$" "$so" || { rm -rf "$work"; return 1; }
-    log "tracing: PHP extension built for $1"
-  fi
-  if [ ! -f "$TRACING/vendor/autoload.php" ]; then
-    curl -fsSL --retry 3 -o "$work/composer.phar" https://getcomposer.org/download/latest-stable/composer.phar &&
-      sum=$(curl -fsSL --retry 3 https://getcomposer.org/download/latest-stable/composer.phar.sha256) &&
-      [ "$(sha256sum < "$work/composer.phar" | cut -d' ' -f1)" = "$(echo "$sum" | cut -d' ' -f1)" ] ||
-      { log "tracing: could not download Composer"; rm -rf "$work"; return 1; }
-    mkdir "$work/lib" && (
-      cd "$work/lib" &&
-        COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_HOME="$work/home" php -d extension="$so" "$work/composer.phar" require \
-          --no-interaction --no-progress --quiet --optimize-autoloader \
-          open-telemetry/sdk open-telemetry/exporter-otlp open-telemetry/opentelemetry-auto-wordpress php-http/guzzle7-adapter
-    ) >"$work/composer.log" 2>&1 || { tail -5 "$work/composer.log"; rm -rf "$work"; return 1; }
-    # Not `cp -a`: the EFS access point does not let the copy keep the owner, so
-    # every file fails with "failed to preserve ownership" and cp exits 1.
-    cp -R "$work/lib/vendor" "$TRACING/vendor.new.$$" && rm -rf "$TRACING/vendor" && mv "$TRACING/vendor.new.$$" "$TRACING/vendor" ||
-      { rm -rf "$work"; return 1; }
-    log "tracing: PHP libraries installed"
-  fi
-  rm -rf "$work"
-}
-
-# Apache reads the two files when it starts. A build that ends later makes it
-# reload them with a graceful restart (SIGUSR1), which lets requests in progress
-# finish. The signal goes to the running Apache only: apache2ctl would start a
-# second one when the first is not up yet.
-tracing_reload_apache() {
-  pidfile=/var/run/apache2/apache2.pid
-  waited=0
-  until [ -s "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; do
-    [ "$waited" -ge 1200 ] && return 1
-    sleep 5
-    waited=$((waited + 5))
-  done
-  kill -USR1 "$(cat "$pidfile")"
 }
 
 tracing_write_bootstrap() {
@@ -657,24 +621,16 @@ tracing() {
     true|True|TRUE|1|yes|on) ;;
     *) return 0 ;;
   esac
+  [ -f "$TRACING/vendor/autoload.php" ] || { log "tracing: the setup assets are missing"; return 1; }
   api=$(basename "$(php -r 'echo PHP_EXTENSION_DIR;')") && [ -n "$api" ] || return 1
-  mkdir -p "$TRACING" || return 1
-  # The folder is under the site's document root: nothing in it is served.
-  printf 'Require all denied\n' > "$TRACING/.htaccess" || return 1
-  tracing_write_bootstrap || return 1
-  if tracing_ready "$api"; then
-    tracing_turn_on "$api" && log "tracing: on"
-    return
+  built=$(cat "$TRACING/ext/api" 2>/dev/null)
+  if [ "$api" != "$built" ]; then
+    log "tracing: the extension is built for the PHP extension API $built and this image has $api; use the image named in assets-src/versions.env"
+    return 1
   fi
-  log "tracing: building the PHP extension and libraries in the background; Apache reloads when they are ready"
-  (
-    unset WP_ADMIN_PASSWORD DB_ADMIN_USER DB_ADMIN_PASSWORD WORDPRESS_DB_PASSWORD WP_DB_BOOTSTRAP
-    if tracing_build "$api" && tracing_ready "$api" && tracing_turn_on "$api"; then
-      if tracing_reload_apache; then log "tracing: on"; else log "tracing: Apache did not start; tracing waits for the next start"; fi
-    else
-      log "tracing: the build failed; the site runs without tracing until the next start"
-    fi
-  ) &
+  ext=$TRACING/ext/$(uname -m)/opentelemetry.so
+  [ -f "$ext" ] || { log "tracing: the setup assets have no extension for $(uname -m)"; return 1; }
+  tracing_write_bootstrap && tracing_turn_on "$ext" && log "tracing: on"
 }
 # --- Apache processes ----------------------------------------------------------
 # Apache in the WordPress image (mpm_prefork) accepts up to 150 requests at the same
@@ -716,12 +672,13 @@ apache_workers() {
 }
 apache_workers || log "apache: the processes stay at the image's default"
 
+assets_fetch || log "assets: not available; tracing stays off and the first setup cannot run"
 tracing || log "tracing: could not be turned on; the site starts without it"
 
 DONE=$STATE/.struct8-setup-done
 STARTED=$STATE/.struct8-setup-started
 LOCK=$STATE/.struct8-setup-lock
-WPCLI=/tmp/wp-cli.phar
+WPCLI=$ASSETS/wp-cli.phar
 
 # --- Code on the container's disk ----------------------------------------------
 # Only with the volume mounted at wp-content/uploads. Every start of a task builds
@@ -887,11 +844,8 @@ local_code_maintenance() {
     done
     trap 'rmdir "$lock" 2>/dev/null' EXIT
     if versions_recorded; then local_code_restore; exit 0; fi
-    cli=$STATE/wp-cli.phar
-    if [ ! -s "$cli" ]; then
-      curl -fsSL --retry 5 --retry-delay 5 -o "$cli.new.$$" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar &&
-        mv "$cli.new.$$" "$cli" || { rm -f "$cli.new.$$"; log "maintenance: could not download WP-CLI"; exit 0; }
-    fi
+    cli=$WPCLI
+    if [ ! -s "$cli" ]; then log "maintenance: WP-CLI is not in the setup assets"; exit 0; fi
     wp() { php "$cli" --allow-root --path="$SITE" "$@"; }
     if ! wp core is-installed >/dev/null 2>&1; then log "maintenance: WordPress is not installed yet"; exit 0; fi
     ok=yes
@@ -962,7 +916,7 @@ retry() {
   done
 }
 
-retry curl -fsSL -o "$WPCLI" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar || { log "could not download WP-CLI"; exit 1; }
+[ -s "$WPCLI" ] || { log "WP-CLI is not in the setup assets"; exit 1; }
 wp() { php "$WPCLI" --allow-root --path="$SITE" "$@"; }
 
 if wp core is-installed >/dev/null 2>&1; then
