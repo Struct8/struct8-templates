@@ -107,7 +107,7 @@ case "${1:-}" in
       echo "opentelemetry-extension=$OTEL_EXTENSION_VERSION"
       echo "wp-cli=$WP_CLI_VERSION"
       php_packages=$(node -e '
-        const lock = require(process.argv[1]);
+        const lock = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
         console.log(lock.packages.map((p) => p.name + "=" + p.version).sort().join("\n"));
       ' "$work/src/composer.lock")
       echo "$php_packages"
