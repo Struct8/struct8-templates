@@ -1,0 +1,131 @@
+name: WordPress setup assets
+
+# The archive templates/wordpress-professional/v1/container/wp-setup-assets.tar.gz
+# holds WP-CLI, the OpenTelemetry PHP extension for arm64 and x86-64, and the PHP
+# libraries of the tracing. wp-auto-setup.sh downloads it from S3 on each start of
+# a task, so nothing is fetched from PECL, Packagist or GitHub in a customer's
+# account. This workflow builds it from assets-src/, fails when the committed
+# archive differs from what the source builds, and serves a traced request with
+# the committed archive in the WordPress image, on both architectures.
+#
+# The extension is compiled again here, and a compiler can write different bytes
+# for the same source: the two opentelemetry.so files are checked by the request,
+# not compared. Every other file in the archive is compared byte for byte.
+#
+# With no committed archive or no composer.lock yet, the run builds both and
+# fails: download the "wp-setup-assets" artifact and commit what it holds.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'templates/wordpress-professional/v1/assets-src/**'
+      - 'templates/wordpress-professional/v1/container/**'
+      - '.github/workflows/wordpress-setup-assets.yml'
+
+permissions:
+  contents: read
+
+env:
+  SRC: templates/wordpress-professional/v1/assets-src
+  ARCHIVE: templates/wordpress-professional/v1/container/wp-setup-assets.tar.gz
+
+jobs:
+  extension:
+    name: Extension (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+          - runner: ubuntu-24.04
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash "$SRC/build.sh" extension ext
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ext-${{ matrix.arch }}
+          path: ext/
+
+  assemble:
+    name: Build the archive
+    needs: extension
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ext-*
+          path: ext
+          merge-multiple: true
+      - name: Build the archive
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          bash "$SRC/build.sh" assemble ext out/wp-setup-assets.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wp-setup-assets
+          path: out/
+
+  compare:
+    name: Archive matches its source
+    needs: assemble
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wp-setup-assets
+          path: out
+      - name: Compare with the committed archive
+        run: |
+          set -euo pipefail
+          if [ -f out/composer.lock ]; then
+            echo "There is no composer.lock: commit the one in the wp-setup-assets artifact as $SRC/composer.lock."
+            exit 1
+          fi
+          if [ ! -f "$ARCHIVE" ]; then
+            echo "There is no committed archive: commit wp-setup-assets.tar.gz from the wp-setup-assets artifact as $ARCHIVE."
+            exit 1
+          fi
+          list() {
+            dir=$(mktemp -d)
+            tar -xzf "$1" -C "$dir"
+            (cd "$dir" && find . -type f ! -path './tracing/ext/*/opentelemetry.so' -print0 | sort -z | xargs -0 sha256sum)
+            (cd "$dir" && find . -type f -path './tracing/ext/*/opentelemetry.so' | sort)
+          }
+          if ! diff <(list "$ARCHIVE") <(list out/wp-setup-assets.tar.gz); then
+            echo
+            echo "The committed archive is not what assets-src/ builds. Commit wp-setup-assets.tar.gz"
+            echo "from the wp-setup-assets artifact of this run as $ARCHIVE."
+            exit 1
+          fi
+          echo "The committed archive matches assets-src/, apart from the two compiled extensions."
+
+  smoke:
+    name: Traced request (${{ matrix.arch }})
+    needs: assemble
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+          - runner: ubuntu-24.04
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wp-setup-assets
+          path: out
+      - name: Serve a request with the archive this run built
+        run: bash "$SRC/build.sh" smoke out/wp-setup-assets.tar.gz
+      - name: Serve a request with the committed archive
+        run: |
+          set -euo pipefail
+          [ -f "$ARCHIVE" ] || { echo "No committed archive yet."; exit 1; }
+          bash "$SRC/build.sh" smoke "$ARCHIVE"

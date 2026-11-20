@@ -1,0 +1,76 @@
+name: Pinned versions
+
+# Rule 9 of the README, made mechanical.
+#
+# A template is applied months after it is published, by people who never read
+# its code. Whatever its scripts download at that moment is whatever is newest
+# then: `latest`, a branch, a package with no version. On 2026-11-20 a new release
+# of a PHP library broke the tracing of WordPress Professional with no change in
+# this repository. A download in a template names one version and checks it.
+#
+# Only the lines a pull request adds are read, so files written before the rule
+# are not refused until somebody changes them.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pinned:
+    name: Downloads name one version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No new line downloads a moving version
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          OVERRIDE: ${{ contains(github.event.pull_request.labels.*.name, 'unpinned-override') }}
+        run: |
+          set -euo pipefail
+
+          # Each pattern, then what it catches.
+          patterns=(
+            ':latest([^-a-zA-Z0-9]|$)'                    # an image tagged latest
+            '(download|releases)/latest|latest-stable'    # the newest release of a download
+            'raw\.githubusercontent\.com/[^/]+/[^/]+/(main|master|gh-pages|HEAD)/'  # a file at the top of a branch
+            'pecl install( -f)? [a-z_]+( |$|>)'           # a PECL package with no -<version>
+            'composer (global )?require'                  # Composer resolving versions when it runs
+            'pip3? install [^-=]*$'                       # pip with no == and no requirements file
+            'npm (i|install) [^-.]'                       # npm adding a package with no lockfile
+          )
+
+          added=$(git diff --unified=0 --no-color "$BASE" "$HEAD" -- 'templates/' \
+            | awk '/^\+\+\+ b\// { file = substr($0, 7); next } /^\+[^+]/ { print file ":" substr($0, 2) }' \
+            | grep -vE '^[^:]+:[[:space:]]*(#|//|\*)' || true)
+
+          found=""
+          for pattern in "${patterns[@]}"; do
+            hits=$(printf '%s\n' "$added" | grep -E -- "$pattern" || true)
+            [ -n "$hits" ] && found="$found$hits"$'\n'
+          done
+
+          if [ -z "$found" ]; then
+            echo "Every download added under templates/ names one version."
+            exit 0
+          fi
+
+          echo "These added lines download a version that changes over time:"
+          printf '%s' "$found" | sort -u | sed 's/^/  /'
+          echo
+          echo "Name one version (a tag with a digest, a release, a package version) and"
+          echo "check the download against a checksum, or commit the built file."
+
+          if [ "$OVERRIDE" = "true" ]; then
+            echo
+            echo "Label 'unpinned-override' is set, so this is allowed. Say in the pull"
+            echo "request why the template needs the newest version."
+            exit 0
+          fi
+          exit 1
