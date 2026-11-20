@@ -141,10 +141,17 @@ case "${1:-}" in
       for i in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1/ 2>/dev/null && break; sleep 1; done
       curl -fsS -H "X-Request-Start: t=$(($(date +%s%3N) - 5))" -H "X-Cdn-Distribution-Id: E2SMOKETEST" http://127.0.0.1/index.php
       for i in $(seq 1 20); do [ -s /tmp/spans.bin ] && break; sleep 1; done
-      if grep -E "PHP (Warning|Fatal|Notice)|struct8-tracing" /tmp/apache.log; then echo "PHP wrote this while tracing"; exit 1; fi
-      [ -s /tmp/spans.bin ] || { echo "no spans reached 127.0.0.1:4318"; exit 1; }
+      sleep 2
+      show() {
+        echo "--- text in the spans received"
+        tr -c "[:print:]" "\n" < /tmp/spans.bin | grep -E ".{3,}" | sort -u | head -150
+        echo "--- Apache and PHP log"
+        tail -40 /tmp/apache.log
+      }
+      if grep -E "PHP (Warning|Fatal|Notice)|struct8-tracing" /tmp/apache.log; then echo "PHP wrote this while tracing"; show; exit 1; fi
+      [ -s /tmp/spans.bin ] || { echo "no spans reached 127.0.0.1:4318"; show; exit 1; }
       for name in "GET /index.php" "CloudFront" "E2SMOKETEST" "wordpress" "WP.main"; do
-        grep -aq "$name" /tmp/spans.bin || { echo "the spans have no \"$name\""; exit 1; }
+        grep -aq "$name" /tmp/spans.bin || { echo "the spans have no \"$name\""; show; exit 1; }
       done
       echo "spans: $(stat -c %s /tmp/spans.bin) bytes, with the WordPress request span"
     '
